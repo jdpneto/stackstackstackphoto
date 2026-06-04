@@ -1187,7 +1187,7 @@ In Xcode: File ▸ New ▸ Project ▸ iOS ▸ App.
 - Product Name: `StackStackStack`
 - Interface: SwiftUI, Language: Swift, Storage: Core Data **unchecked** (we add it manually in Task 13), Include Tests: **checked**.
 - Save **inside** the repo root `photo-stack-app/` (so `StackStackStack.xcodeproj` sits next to `Packages/`).
-- Set the **iOS Deployment Target to 16.0** (project ▸ target ▸ General).
+- Set the **iOS Deployment Target to 16.0** (project ▸ target ▸ General). **Set it on the Test and UITest targets too**, not just the app — Xcode defaults new test targets to the latest SDK (e.g. 26.5), which then refuses to run on any simulator with an older runtime. (`IPHONEOS_DEPLOYMENT_TARGET` should read 16.x for all three targets.)
 
 - [ ] **Step 2: Add the local package dependency**
 
@@ -1581,6 +1581,7 @@ final class LibraryStore {
 Create `StackStackStack/StackCaptureCoordinator.swift`:
 ```swift
 import Foundation
+import Combine            // required for ObservableObject / @Published
 import StackEngineCore
 
 /// Orchestrates one capture: burst → develop+align+stack → encode → save.
