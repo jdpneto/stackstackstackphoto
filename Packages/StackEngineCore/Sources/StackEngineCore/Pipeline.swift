@@ -7,6 +7,7 @@ public enum Pipeline {
         precondition(!imgs.isEmpty)
         if imgs.count == 1 { return imgs }
         let w = imgs[0].width, h = imgs[0].height
+        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
         let lumas = imgs.map { Luma.luminance($0) }
         let refIdx = ReferenceSelection.sharpestIndex(lumas: lumas, width: w, height: h)
         var aligned = [PixelImage]()
@@ -24,7 +25,7 @@ public enum Pipeline {
     public static func reduceImages(_ imgs: [PixelImage], mode: StackMode, searchRange: Int = 8) -> PixelImage {
         let aligned = alignedStack(imgs, searchRange: searchRange)
         switch mode {
-        case .noiseReduction: return StackReducer.sigmaClippedMean(aligned)
+        case .noiseReduction: return StackReducer.sigmaClippedMean(aligned) // kappa fixed at 2.0; use noiseReductionImages for an explicit kappa
         case .smoothMotion:   return StackReducer.mean(aligned)
         case .lightTrails:    return StackReducer.lighten(aligned)
         case .lowLightBoost:  return StackReducer.boostedMean(aligned, gain: 2.0)

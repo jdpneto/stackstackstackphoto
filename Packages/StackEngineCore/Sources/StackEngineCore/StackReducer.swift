@@ -83,10 +83,9 @@ public enum StackReducer {
     /// Robust (sigma-clipped) mean with an exposure gain — low-light-boost look. Output may
     /// exceed 1.0 (the output transform clamps). gain > 1 brightens; gain == 1 == noise reduction.
     public static func boostedMean(_ imgs: [PixelImage], gain: Float) -> PixelImage {
-        let base = sigmaClippedMean(imgs)
-        if gain == 1 { return base }
-        var out = base
-        for i in 0..<out.pixels.count { out.pixels[i] = base.pixels[i] * gain }
+        precondition(!imgs.isEmpty)
+        var out = sigmaClippedMean(imgs)
+        for i in 0..<out.pixels.count { out.pixels[i] *= gain }
         return out
     }
 }
