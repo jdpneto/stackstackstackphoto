@@ -694,22 +694,28 @@ public enum Alignment {
         let w = ref.width, h = ref.height
         var best = Translation(dx: 0, dy: 0)
         var bestCost = Float.infinity
-        for dy in -r...r {
-            for dx in -r...r {
-                var cost: Float = 0
-                var count: Float = 0
-                let yStart = max(0, -dy), yEnd = min(h, h - dy)
-                let xStart = max(0, -dx), xEnd = min(w, w - dx)
-                if yStart >= yEnd || xStart >= xEnd { continue }
-                for y in yStart..<yEnd {
-                    for x in xStart..<xEnd {
-                        let d = lr[y * w + x] - lm[(y + dy) * w + (x + dx)]
-                        cost += d * d
-                        count += 1
+        // Iterate from zero outward (magnitude shells) so equal-cost ties are broken in
+        // favour of the SMALLEST displacement. This matters for low-texture / degenerate
+        // scenes where several shifts share the same SSD; the minimal shift is the correct one.
+        for mag in 0...r {
+            for dy in -mag...mag {
+                for dx in -mag...mag {
+                    guard abs(dx) == mag || abs(dy) == mag else { continue } // current shell only
+                    var cost: Float = 0
+                    var count: Float = 0
+                    let yStart = max(0, -dy), yEnd = min(h, h - dy)
+                    let xStart = max(0, -dx), xEnd = min(w, w - dx)
+                    if yStart >= yEnd || xStart >= xEnd { continue }
+                    for y in yStart..<yEnd {
+                        for x in xStart..<xEnd {
+                            let d = lr[y * w + x] - lm[(y + dy) * w + (x + dx)]
+                            cost += d * d
+                            count += 1
+                        }
                     }
+                    let mean = cost / count
+                    if mean < bestCost { bestCost = mean; best = Translation(dx: dx, dy: dy) }
                 }
-                let mean = cost / count
-                if mean < bestCost { bestCost = mean; best = Translation(dx: dx, dy: dy) }
             }
         }
         return best
@@ -1014,8 +1020,11 @@ Add to `PipelineTests.swift` (inside the class):
             var img = PixelImage(width: w, height: h)
             for y in 0..<h { for x in 0..<w {
                 let cx = min(max(x - sx, 0), w - 1), cy = min(max(y - sy, 0), h - 1)
-                // zero-mean-ish noise that averages out across frames
-                let noise = Float((k * 37 + x * 7 + y * 13) % 11 - 5) / 100.0
+                // Deterministic noise in SCENE coordinates (cx,cy): this keeps each scene
+                // point's noise consistent across aligned frames so it averages out after
+                // stacking, while still varying with frame index k. Amplitude ÷200 (≈±0.025)
+                // stays below the per-pixel luma gradient (≈0.030) so alignment stays reliable.
+                let noise = Float((k * 37 + cx * 7 + cy * 13) % 11 - 5) / 200.0
                 let base = clean[cx, cy]
                 img[x, y] = SIMD3<Float>(base.x + noise, base.y + noise, base.z + noise)
             }}
