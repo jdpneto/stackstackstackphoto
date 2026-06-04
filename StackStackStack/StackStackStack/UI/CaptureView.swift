@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import Combine
+import StackEngineCore
 
 struct CaptureView: View {
     @ObservedObject var coordinator: StackCaptureCoordinator
@@ -14,9 +15,10 @@ struct CaptureView: View {
                 if let img = lastResult {
                     Image(uiImage: img).resizable().scaledToFit().padding()
                 } else {
-                    Text("Detail (Noise Reduction)").foregroundColor(.white)
+                    Text(coordinator.mode.shortLabel).foregroundColor(.white).font(.title3)
                 }
                 Spacer()
+                lookPicker
                 statusLabel
                 shutterButton.padding(.bottom, 40)
             }
@@ -52,5 +54,36 @@ struct CaptureView: View {
 
     private var isBusy: Bool {
         switch coordinator.state { case .capturing, .processing: return true; default: return false }
+    }
+
+    private var lookPicker: some View {
+        HStack(spacing: 8) {
+            ForEach(StackMode.allCases, id: \.self) { m in
+                Button { coordinator.mode = m } label: {
+                    Text(m.shortLabel)
+                        .font(.caption)
+                        .fontWeight(coordinator.mode == m ? .bold : .regular)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(coordinator.mode == m ? Color.white : Color.white.opacity(0.18))
+                        .foregroundColor(coordinator.mode == m ? .black : .white)
+                        .clipShape(Capsule())
+                }
+                .accessibilityIdentifier("look-\(m)")
+                .disabled(isBusy)
+            }
+        }
+        .padding(.bottom, 8)
+    }
+}
+
+extension StackMode {
+    /// Short label shown in the capture-screen look-picker.
+    var shortLabel: String {
+        switch self {
+        case .noiseReduction: return "Detail"
+        case .smoothMotion:   return "Smooth"
+        case .lightTrails:    return "Trails"
+        case .lowLightBoost:  return "Night"
+        }
     }
 }

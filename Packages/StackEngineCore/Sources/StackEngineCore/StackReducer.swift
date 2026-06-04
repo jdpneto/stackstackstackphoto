@@ -50,4 +50,42 @@ public enum StackReducer {
         }
         return out
     }
+
+    /// Plain per-pixel temporal mean — keeps scene motion (smooth-motion look).
+    public static func mean(_ imgs: [PixelImage]) -> PixelImage {
+        precondition(!imgs.isEmpty)
+        let w = imgs[0].width, h = imgs[0].height
+        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
+        var out = PixelImage(width: w, height: h)
+        let inv = 1 / Float(imgs.count)
+        for i in 0..<(w * h) {
+            var acc = SIMD3<Float>(0, 0, 0)
+            for im in imgs { acc += im.pixels[i] }
+            out.pixels[i] = acc * inv
+        }
+        return out
+    }
+
+    /// Per-channel lighten (max) across frames — light streaks accumulate (light-trails look).
+    public static func lighten(_ imgs: [PixelImage]) -> PixelImage {
+        precondition(!imgs.isEmpty)
+        let w = imgs[0].width, h = imgs[0].height
+        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
+        var out = PixelImage(width: w, height: h)
+        for i in 0..<(w * h) {
+            var m = imgs[0].pixels[i]
+            for k in 1..<imgs.count { m = simd_max(m, imgs[k].pixels[i]) }
+            out.pixels[i] = m
+        }
+        return out
+    }
+
+    /// Robust (sigma-clipped) mean with an exposure gain — low-light-boost look. Output may
+    /// exceed 1.0 (the output transform clamps). gain > 1 brightens; gain == 1 == noise reduction.
+    public static func boostedMean(_ imgs: [PixelImage], gain: Float) -> PixelImage {
+        precondition(!imgs.isEmpty)
+        var out = sigmaClippedMean(imgs)
+        for i in 0..<out.pixels.count { out.pixels[i] *= gain }
+        return out
+    }
 }

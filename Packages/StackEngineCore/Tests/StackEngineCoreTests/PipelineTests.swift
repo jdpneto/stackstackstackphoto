@@ -122,4 +122,19 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(image.width, w)
         XCTAssertEqual(rgba8.count, w * h * 4)
     }
+
+    func testReduceImagesDispatchesByMode() {
+        // Two aligned frames (no shift) with distinct values; check each mode's reducer is used.
+        // searchRange: 0 → identity translation (mag=0 shell only); isolates the reducer, not alignment.
+        let a = PixelImage(width: 2, height: 1, pixels: [SIMD3<Float>(0.2, 0.2, 0.2), SIMD3<Float>(0.2, 0.2, 0.2)])
+        let b = PixelImage(width: 2, height: 1, pixels: [SIMD3<Float>(0.8, 0.8, 0.8), SIMD3<Float>(0.8, 0.8, 0.8)])
+        // smoothMotion → mean = 0.5
+        XCTAssertEqual(Pipeline.reduceImages([a, b], mode: .smoothMotion, searchRange: 0)[0, 0].x, 0.5, accuracy: 1e-5)
+        // lightTrails → max = 0.8
+        XCTAssertEqual(Pipeline.reduceImages([a, b], mode: .lightTrails, searchRange: 0)[0, 0].x, 0.8, accuracy: 1e-5)
+        // lowLightBoost → robust mean (0.5) × 2.0 = 1.0
+        XCTAssertEqual(Pipeline.reduceImages([a, b], mode: .lowLightBoost, searchRange: 0)[0, 0].x, 1.0, accuracy: 1e-5)
+        // noiseReduction → robust mean; at N=2 kappa=2.0 can't clip, so = 0.5 (pins the dispatch route)
+        XCTAssertEqual(Pipeline.reduceImages([a, b], mode: .noiseReduction, searchRange: 0)[0, 0].x, 0.5, accuracy: 1e-5)
+    }
 }
