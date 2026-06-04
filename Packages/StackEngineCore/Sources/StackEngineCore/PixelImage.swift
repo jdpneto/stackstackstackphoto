@@ -19,7 +19,7 @@ public struct PixelImage: Equatable {
         self.pixels = Array(repeating: fill, count: width * height)
     }
 
-    @inline(__always) func index(_ x: Int, _ y: Int) -> Int { y * width + x }
+    @inline(__always) private func index(_ x: Int, _ y: Int) -> Int { y * width + x }
 
     public subscript(x: Int, y: Int) -> SIMD3<Float> {
         get { pixels[index(x, y)] }

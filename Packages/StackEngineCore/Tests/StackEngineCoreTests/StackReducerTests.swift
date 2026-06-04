@@ -24,4 +24,19 @@ final class StackReducerTests: XCTestCase {
         let out = StackReducer.sigmaClippedMean([flat(0.2), flat(0.8)], kappa: 1.5)
         XCTAssertEqual(out[0, 0].x, 0.5, accuracy: 1e-5)
     }
+
+    func testRejectsOutlierWithDefaultKappa() {
+        // At N=6, kappa=2.0 CAN reject a single extreme outlier.
+        let imgs = [flat(0.5), flat(0.5), flat(0.5), flat(0.5), flat(0.5), flat(10.0)]
+        let out = StackReducer.sigmaClippedMean(imgs) // default kappa 2.0
+        XCTAssertEqual(out[0, 0].x, 0.5, accuracy: 1e-4)
+    }
+    func testSmallBurstWithDefaultKappaIsPlainMean() {
+        // Documents the known limitation: at N=5, kappa=2.0 cannot reject any single
+        // outlier (max z-score is exactly 2.0, and the filter keeps boundary values),
+        // so the result is the plain mean.
+        let imgs = [flat(0.0), flat(0.0), flat(0.0), flat(0.0), flat(5.0)]
+        let out = StackReducer.sigmaClippedMean(imgs) // default kappa 2.0
+        XCTAssertEqual(out[0, 0].x, 1.0, accuracy: 1e-4) // (0+0+0+0+5)/5 = 1.0, no clipping
+    }
 }

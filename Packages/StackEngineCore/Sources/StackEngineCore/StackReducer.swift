@@ -2,6 +2,11 @@ import simd
 
 public enum StackReducer {
     /// Per-pixel, per-channel sigma-clipped mean across aligned frames.
+    ///
+    /// IMPORTANT: a single outlier's maximum z-score is bounded by sqrt(N-1) for N samples,
+    /// so with the default `kappa = 2.0` an outlier is only rejectable when N >= 6. For
+    /// smaller bursts (N <= 5) at kappa 2.0 this returns the plain mean — no clipping is
+    /// mathematically possible. Use a smaller `kappa` (e.g. 1.5) to clip on small bursts.
     public static func sigmaClippedMean(_ imgs: [PixelImage],
                                         kappa: Float = 2.0,
                                         iterations: Int = 3) -> PixelImage {
@@ -14,7 +19,6 @@ public enum StackReducer {
             for ch in 0..<3 {
                 var kept = [Float](); kept.reserveCapacity(n)
                 for im in imgs { kept.append(im.pixels[i][ch]) }
-                let original = kept
                 var iter = 0
                 while iter < iterations && kept.count > 2 {
                     let mean = kept.reduce(0, +) / Float(kept.count)
@@ -27,8 +31,9 @@ public enum StackReducer {
                     kept = filtered
                     iter += 1
                 }
-                let survivors = kept.count >= 3 ? kept : original
-                out.pixels[i][ch] = survivors.reduce(0, +) / Float(survivors.count)
+                // `kept` is never emptied: the loop breaks before dropping below 3 survivors,
+                // and for N <= 2 it never runs — so the mean of `kept` is always well-defined.
+                out.pixels[i][ch] = kept.reduce(0, +) / Float(kept.count)
             }
         }
         return out

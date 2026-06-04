@@ -98,4 +98,28 @@ final class PipelineTests: XCTestCase {
                                 OutputTransform.encodeSRGB8(interiorCrop(refClean)))
         XCTAssertGreaterThan(psnr, 40.0)
     }
+
+    func testNoiseReductionRawPathProducesDevelopedImage() {
+        let w = 8, h = 8
+        let frames = (0..<3).map { _ in
+            RawSensorFrame(width: w, height: h, mosaic: [UInt16](repeating: 600, count: w * h),
+                           blackLevel: 64, whiteLevel: 1024, cfa: .rggb)
+        }
+        let result = Pipeline.noiseReduction(frames)
+        XCTAssertEqual(result.width, w)
+        XCTAssertEqual(result.height, h)
+        let p = result[4, 4]
+        XCTAssertGreaterThan(p.x, 0)
+        XCTAssertTrue(p.x.isFinite && p.y.isFinite && p.z.isFinite)
+    }
+    func testNoiseReductionEncodedReturnsImageAndBytes() {
+        let w = 8, h = 8
+        let frames = (0..<3).map { _ in
+            RawSensorFrame(width: w, height: h, mosaic: [UInt16](repeating: 600, count: w * h),
+                           blackLevel: 64, whiteLevel: 1024, cfa: .rggb)
+        }
+        let (image, rgba8) = Pipeline.noiseReductionEncoded(frames)
+        XCTAssertEqual(image.width, w)
+        XCTAssertEqual(rgba8.count, w * h * 4)
+    }
 }
