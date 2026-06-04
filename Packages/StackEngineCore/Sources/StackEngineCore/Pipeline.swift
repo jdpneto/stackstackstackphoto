@@ -1,16 +1,12 @@
 import simd
 
 public enum Pipeline {
-    /// End-to-end noise reduction over already-developed linear images:
-    /// pick sharpest reference → align each frame → sigma-clipped mean.
-    public static func noiseReductionImages(_ imgs: [PixelImage],
-                                            searchRange: Int = 8,
-                                            kappa: Float = 2.0) -> PixelImage {
+    /// Align a burst to its sharpest frame (shared by every look). Luminance is computed once
+    /// per frame and reused for reference selection AND per-frame alignment.
+    static func alignedStack(_ imgs: [PixelImage], searchRange: Int) -> [PixelImage] {
         precondition(!imgs.isEmpty)
-        if imgs.count == 1 { return imgs[0] }
+        if imgs.count == 1 { return imgs }
         let w = imgs[0].width, h = imgs[0].height
-        // Luminance is computed once per frame and reused for BOTH reference selection
-        // and per-frame alignment (previously recomputed several times).
         let lumas = imgs.map { Luma.luminance($0) }
         let refIdx = ReferenceSelection.sharpestIndex(lumas: lumas, width: w, height: h)
         var aligned = [PixelImage]()
@@ -21,18 +17,40 @@ public enum Pipeline {
                                                   width: w, height: h, searchRange: searchRange)
             aligned.append(Alignment.warp(im, by: t))
         }
-        return StackReducer.sigmaClippedMean(aligned, kappa: kappa)
+        return aligned
     }
 
-    /// End-to-end from raw frames: develop each → noise reduction.
+    /// Align then apply the look's reducer.
+    public static func reduceImages(_ imgs: [PixelImage], mode: StackMode, searchRange: Int = 8) -> PixelImage {
+        let aligned = alignedStack(imgs, searchRange: searchRange)
+        switch mode {
+        case .noiseReduction: return StackReducer.sigmaClippedMean(aligned)
+        case .smoothMotion:   return StackReducer.mean(aligned)
+        case .lightTrails:    return StackReducer.lighten(aligned)
+        case .lowLightBoost:  return StackReducer.boostedMean(aligned, gain: 2.0)
+        }
+    }
+
+    /// End-to-end from raw frames: develop each → align → reduce for the chosen look.
+    public static func reduce(_ frames: [RawSensorFrame], mode: StackMode, searchRange: Int = 8) -> PixelImage {
+        reduceImages(frames.map { ColorPipeline.process($0) }, mode: mode, searchRange: searchRange)
+    }
+
+    // MARK: - Noise-reduction-specific entry points (kept for the golden harness/tests)
+
+    /// Noise reduction with an explicit kappa (used by the golden convergence test).
+    public static func noiseReductionImages(_ imgs: [PixelImage],
+                                            searchRange: Int = 8,
+                                            kappa: Float = 2.0) -> PixelImage {
+        StackReducer.sigmaClippedMean(alignedStack(imgs, searchRange: searchRange), kappa: kappa)
+    }
+
     public static func noiseReduction(_ frames: [RawSensorFrame],
                                       searchRange: Int = 8,
                                       kappa: Float = 2.0) -> PixelImage {
-        let imgs = frames.map { ColorPipeline.process($0) }
-        return noiseReductionImages(imgs, searchRange: searchRange, kappa: kappa)
+        noiseReductionImages(frames.map { ColorPipeline.process($0) }, searchRange: searchRange, kappa: kappa)
     }
 
-    /// Convenience for the app + golden harness: raw frames → encoded sRGB RGBA8.
     public static func noiseReductionEncoded(_ frames: [RawSensorFrame]) -> (image: PixelImage, rgba8: [UInt8]) {
         let result = noiseReduction(frames)
         return (result, OutputTransform.encodeSRGB8(result))
