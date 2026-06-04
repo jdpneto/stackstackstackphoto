@@ -324,6 +324,7 @@ All reducers operate on aligned frames in linear working space.
 ### 13.1 Noise reduction / detail
 - Capture N frames, fixed settings; align all to reference.
 - **Per-pixel sigma-clipped mean:** compute mean μ and std σ across frames; iteratively reject samples with `|x − μ| > κσ` (default κ = 2), recompute; output the mean of survivors. If survivors < 3, fall back to the **median**.
+  - **κ vs frame count (important):** a single outlier's maximum z-score is √(N−1), so at κ = 2 outlier rejection is only effective for **N ≥ 6**; at N ≤ 5 the result is a plain mean. Auto mode must therefore couple κ to the burst size — for small bursts (N ≤ 5) it should use κ ≤ 1.5 so de-ghosting actually engages. (A future option is MAD-based robust rejection, which behaves better at small N.)
 - Noise reduces ~ `σ_single / √N_eff`.
 - **Optional** mild edge-aware unsharp mask in linear to restore micro-contrast (default amount low).
 - *Future:* sub-pixel shifts between frames enable drizzle/Bayer super-resolution for true added detail — not in this version.
@@ -472,7 +473,7 @@ Look-tagged thumbnail grid; tap → result + metadata + edit/share/export/delete
 | Parameter | Default | Pro range | Notes |
 |---|---|---|---|
 | Noise: frame count N | 5–20 (scene-adaptive) | 2–30 | more at high ISO |
-| Noise: sigma-clip κ | 2.0 | 1.5–3.0 | survivors < 3 ⇒ median |
+| Noise: sigma-clip κ | 2.0 (κ ≤ 1.5 when N ≤ 5) | 1.5–3.0 | survivors < 3 ⇒ median; κ=2 only clips at N ≥ 6 |
 | DoF: bracket count M | computed | 3–24 | from DoF overlap |
 | DoF: sharpness window | 5×5 | 3×3–9×9 | modified Laplacian |
 | Long-exp: duration d | scene/intent | 0.5–60 s | hard cap 60 s |
