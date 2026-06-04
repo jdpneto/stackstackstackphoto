@@ -8,6 +8,8 @@
 
 **Tech Stack:** Swift 5.9+, Swift Package Manager, XCTest, simd, AVFoundation (RAW capture), ImageIO (JPEG/HEIC), Core Data, SwiftUI. Min targets: iOS 16 (app), macOS 13 (so the core package tests run on the Mac CLI).
 
+> **Post-review hardening note:** after the initial build a code review found 15 issues, all fixed in a follow-up commit. The app-layer code in Tasks 11–14 below shows the *initial* shape; the committed code supersedes it with: an `@unchecked Sendable` `AVCaptureService` that confines burst state to a serial queue (resume-exactly-once, empty→throw, re-entrancy guard, permission flow, lazy off-main config); a coordinator that runs stacking/encode **off the MainActor** and publishes the result JPEG (no second store / main-thread disk read); a single `@StateObject` coordinator in the App (no per-body session leak); downsampled off-main gallery thumbnails; `RawFrameConverter` reading real DNG black/white levels; camera/photo Info.plist usage strings; and the app target set to `nonisolated` default actor isolation. Engine: in-place `StackReducer` (no per-pixel allocation), luminance computed once and reused, `searchRange` precondition. Follow the committed code over these snippets where they differ.
+
 ---
 
 ## File structure (this plan)
