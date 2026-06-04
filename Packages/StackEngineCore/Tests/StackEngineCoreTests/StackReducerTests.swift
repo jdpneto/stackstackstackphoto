@@ -19,4 +19,9 @@ final class StackReducerTests: XCTestCase {
         let out = StackReducer.sigmaClippedMean(imgs, kappa: 1.5)
         XCTAssertEqual(out[0, 0].x, 0.5, accuracy: 1e-4)
     }
+
+    func testTwoFramesReturnPlainMean() {
+        let out = StackReducer.sigmaClippedMean([flat(0.2), flat(0.8)], kappa: 1.5)
+        XCTAssertEqual(out[0, 0].x, 0.5, accuracy: 1e-5)
+    }
 }

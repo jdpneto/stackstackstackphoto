@@ -7,6 +7,7 @@ public enum StackReducer {
                                         iterations: Int = 3) -> PixelImage {
         precondition(!imgs.isEmpty)
         let w = imgs[0].width, h = imgs[0].height
+        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
         let n = imgs.count
         var out = PixelImage(width: w, height: h)
         for i in 0..<(w * h) {

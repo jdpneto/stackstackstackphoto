@@ -22,4 +22,8 @@ final class ReferenceSelectionTests: XCTestCase {
         let frames = [flat(8, 0.5), checkerboard(8), flat(8, 0.3)]
         XCTAssertEqual(ReferenceSelection.sharpestIndex(frames), 1)
     }
+
+    func testSingleFrameReturnsZero() {
+        XCTAssertEqual(ReferenceSelection.sharpestIndex([flat(8, 0.5)]), 0)
+    }
 }

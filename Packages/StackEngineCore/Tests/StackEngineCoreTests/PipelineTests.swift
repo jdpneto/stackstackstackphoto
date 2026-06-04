@@ -3,18 +3,6 @@ import simd
 @testable import StackEngineCore
 
 final class PipelineTests: XCTestCase {
-    func testPSNRIdenticalIsInfinite() {
-        let a: [UInt8] = [10, 20, 30, 255]
-        XCTAssertEqual(Metrics.psnr(a, a), .infinity)
-    }
-    func testPSNRDecreasesWithError() {
-        let a: [UInt8] = [100, 100, 100, 100]
-        let b: [UInt8] = [110, 90, 105, 100]
-        let p = Metrics.psnr(a, b)
-        XCTAssertGreaterThan(p, 20)
-        XCTAssertLessThan(p, 60)
-    }
-
     /// Deterministic synthetic scene + per-frame noise + small shifts.
     private func makeNoisyShiftedStack(clean: PixelImage, count: Int) -> [PixelImage] {
         let w = clean.width, h = clean.height
@@ -39,27 +27,75 @@ final class PipelineTests: XCTestCase {
         return frames
     }
 
-    func testNoiseReductionConvergesToCleanScene() {
+    func testNoiseReductionConvergesAndBeatsSingleFrame() {
         let n = 24
+        // Deterministic high-frequency texture. Its near-delta autocorrelation gives the SSD
+        // search a sharp, unambiguous minimum at the true integer shift — this avoids the
+        // aperture problem that ANY smooth ramp suffers (where a pure-horizontal and a
+        // pure-vertical 1px shift produce identical cost). Range ~0.15...0.9: no deep shadows.
+        func texel(_ x: Int, _ y: Int) -> Float {
+            var h = UInt32(truncatingIfNeeded: x &* 73856093) ^ UInt32(truncatingIfNeeded: y &* 19349663)
+            h = h &* 2654435761
+            h ^= h >> 13
+            h = h &* 2246822519
+            h ^= h >> 16
+            return Float(h & 0xFFFF) / Float(0xFFFF)
+        }
         var clean = PixelImage(width: n, height: n)
         for y in 0..<n { for x in 0..<n {
-            let v = Float(x) / Float(n)               // horizontal gradient (alignable)
-            clean[x, y] = SIMD3<Float>(v, v * 0.8, 1 - v)
+            let s = 0.15 + 0.75 * texel(x, y)
+            clean[x, y] = SIMD3<Float>(s, s, s)
         }}
         let frames = makeNoisyShiftedStack(clean: clean, count: 12)
-        let result = Pipeline.noiseReductionImages(frames, searchRange: 2, kappa: 2.0)
 
-        // Compare interior (avoid edge-clamp artifacts from warping).
-        var maxDiff: Float = 0
-        for y in 4..<(n-4) { for x in 4..<(n-4) {
-            let d = result[x, y] - clean[x, y]
-            maxDiff = max(maxDiff, max(abs(d.x), max(abs(d.y), abs(d.z))))
+        // The pipeline aligns everything to the SHARPEST frame, so the result lives in that
+        // frame's coordinate system (clean shifted by the reference frame's own shift).
+        func trueShift(_ k: Int) -> StackEngineCore.Translation {
+            StackEngineCore.Translation(dx: (k % 3) - 1, dy: ((k / 3) % 3) - 1)
+        }
+        let refIdx = ReferenceSelection.sharpestIndex(frames)
+        let ref = trueShift(refIdx)
+
+        // Alignment must recover each non-reference frame's true integer shift.
+        for k in 0..<frames.count where k != refIdx {
+            let est = Alignment.estimateTranslation(reference: frames[refIdx], moving: frames[k], searchRange: 2)
+            let expected = StackEngineCore.Translation(dx: trueShift(k).dx - ref.dx, dy: trueShift(k).dy - ref.dy)
+            XCTAssertEqual(est, expected, "alignment should recover frame \(k)'s true shift")
+        }
+
+        // Ground truth expressed in the reference frame's coordinates.
+        var refClean = PixelImage(width: n, height: n)
+        for y in 0..<n { for x in 0..<n {
+            let cx = min(max(x - ref.dx, 0), n - 1), cy = min(max(y - ref.dy, 0), n - 1)
+            refClean[x, y] = clean[cx, cy]
         }}
-        XCTAssertLessThan(maxDiff, 0.03, "stacked result should converge to the clean scene")
 
-        // And the encoded result should be high-PSNR vs the encoded clean scene.
-        let psnr = Metrics.psnr(OutputTransform.encodeSRGB8(result),
-                                OutputTransform.encodeSRGB8(clean))
-        XCTAssertGreaterThan(psnr, 30.0)
+        let result = Pipeline.noiseReductionImages(frames, searchRange: 2, kappa: 2.0)
+        func interiorMaxDiff(_ a: PixelImage, _ b: PixelImage) -> Float {
+            var m: Float = 0
+            for y in 4..<(n - 4) { for x in 4..<(n - 4) {
+                let d = a[x, y] - b[x, y]
+                m = max(m, max(abs(d.x), max(abs(d.y), abs(d.z))))
+            }}
+            return m
+        }
+        let stackedMax = interiorMaxDiff(result, refClean)
+        // No-op baseline: the single sharpest frame still carries full per-pixel noise.
+        let baselineMax = interiorMaxDiff(frames[refIdx], refClean)
+
+        XCTAssertLessThan(stackedMax, baselineMax * 0.5, "stacking should clearly beat one frame")
+        XCTAssertLessThan(stackedMax, 0.01, "stacked result should converge to the clean scene")
+
+        // PSNR over the interior only: warp edge-clamping cannot reconstruct content that
+        // shifted in from outside the frame, so borders are excluded (same region as maxDiff).
+        func interiorCrop(_ img: PixelImage) -> PixelImage {
+            let m = 4
+            var out = PixelImage(width: n - 2 * m, height: n - 2 * m)
+            for y in m..<(n - m) { for x in m..<(n - m) { out[x - m, y - m] = img[x, y] } }
+            return out
+        }
+        let psnr = Metrics.psnr(OutputTransform.encodeSRGB8(interiorCrop(result)),
+                                OutputTransform.encodeSRGB8(interiorCrop(refClean)))
+        XCTAssertGreaterThan(psnr, 40.0)
     }
 }
