@@ -65,4 +65,18 @@ public enum StackReducer {
         }
         return out
     }
+
+    /// Per-channel lighten (max) across frames — light streaks accumulate (light-trails look).
+    public static func lighten(_ imgs: [PixelImage]) -> PixelImage {
+        precondition(!imgs.isEmpty)
+        let w = imgs[0].width, h = imgs[0].height
+        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
+        var out = PixelImage(width: w, height: h)
+        for i in 0..<(w * h) {
+            var m = imgs[0].pixels[i]
+            for k in 1..<imgs.count { m = simd_max(m, imgs[k].pixels[i]) }
+            out.pixels[i] = m
+        }
+        return out
+    }
 }

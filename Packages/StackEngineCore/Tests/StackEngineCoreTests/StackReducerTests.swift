@@ -45,4 +45,13 @@ final class StackReducerTests: XCTestCase {
         let out = StackReducer.mean([flat(0.0), flat(0.4), flat(0.8), flat(10.0)])
         XCTAssertEqual(out[0, 0].x, (0.0 + 0.4 + 0.8 + 10.0) / 4, accuracy: 1e-5)
     }
+
+    func testLightenTakesPerChannelMax() {
+        let a = PixelImage(width: 1, height: 1, pixels: [SIMD3<Float>(0.2, 0.8, 0.1)])
+        let b = PixelImage(width: 1, height: 1, pixels: [SIMD3<Float>(0.7, 0.3, 0.5)])
+        let out = StackReducer.lighten([a, b])
+        XCTAssertEqual(out[0, 0].x, 0.7, accuracy: 1e-6)
+        XCTAssertEqual(out[0, 0].y, 0.8, accuracy: 1e-6)
+        XCTAssertEqual(out[0, 0].z, 0.5, accuracy: 1e-6)
+    }
 }
