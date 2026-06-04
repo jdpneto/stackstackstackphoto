@@ -1,12 +1,23 @@
+# === macOS / general ===
+.DS_Store
+*.log
+
+# === Superpowers scratch (brainstorm companion, etc.) ===
+.superpowers/
+
+# === Swift / Xcode (iOS app + StackEngineCore package) ===
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# === Android (future phase) ===
 # Gradle files
 .gradle/
 build/
 
 # Local configuration file (sdk path, etc)
 local.properties
-
-# Log/OS Files
-*.log
 
 # Android Studio generated files and folders
 captures/
