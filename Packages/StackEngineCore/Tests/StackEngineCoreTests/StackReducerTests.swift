@@ -54,4 +54,12 @@ final class StackReducerTests: XCTestCase {
         XCTAssertEqual(out[0, 0].y, 0.8, accuracy: 1e-6)
         XCTAssertEqual(out[0, 0].z, 0.5, accuracy: 1e-6)
     }
+
+    func testBoostedMeanAppliesGain() {
+        // Robust mean of five 0.3s is 0.3; gain 2.0 → 0.6 (linear; output clamps later).
+        let imgs = [flat(0.3), flat(0.3), flat(0.3), flat(0.3), flat(0.3)]
+        XCTAssertEqual(StackReducer.boostedMean(imgs, gain: 2.0)[0, 0].x, 0.6, accuracy: 1e-5)
+        // gain 1.0 is identical to the robust mean.
+        XCTAssertEqual(StackReducer.boostedMean(imgs, gain: 1.0)[0, 0].x, 0.3, accuracy: 1e-5)
+    }
 }
