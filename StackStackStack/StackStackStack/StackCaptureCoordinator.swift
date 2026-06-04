@@ -9,6 +9,8 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published private(set) var state: State = .idle
     /// The finished JPEG, published so the UI can show it without re-reading disk.
     @Published private(set) var lastResultJPEG: Data?
+    /// The currently selected look. Settable from the capture UI.
+    @Published var mode: StackMode = .noiseReduction
 
     private let capture: CaptureService
     private let store: LibraryStore
@@ -24,9 +26,10 @@ final class StackCaptureCoordinator: ObservableObject {
             let frames = try await capture.captureBurst(mode: .noiseReduction, frameCount: frameCount)
             guard !frames.isEmpty else { state = .failed("No frames were captured."); return }
             state = .processing
-            let jpeg = try await Self.makeJPEG(from: frames)   // heavy work, off the main actor
+            let mode = self.mode
+            let jpeg = try await Self.makeJPEG(from: frames, mode: mode)   // heavy work, off the main actor
             lastResultJPEG = jpeg
-            let saved = try store.save(resultJPEG: jpeg, mode: "noiseReduction", frameCount: frames.count)
+            let saved = try store.save(resultJPEG: jpeg, mode: "\(mode)", frameCount: frames.count)
             state = .done(saved.id)
         } catch {
             state = .failed(error.localizedDescription)
@@ -34,9 +37,9 @@ final class StackCaptureCoordinator: ObservableObject {
     }
 
     /// CPU-heavy develop → align → stack → encode, run off the MainActor to keep the UI responsive.
-    nonisolated private static func makeJPEG(from frames: [RawSensorFrame]) async throws -> Data {
+    nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
-            let result = Pipeline.noiseReduction(frames)
+            let result = Pipeline.reduce(frames, mode: mode)
             let rgba = OutputTransform.encodeSRGB8(result)
             return try ImageEncoder.encode(rgba8: rgba, width: result.width, height: result.height,
                                            format: .jpeg, quality: 0.95)
