@@ -39,4 +39,10 @@ final class StackReducerTests: XCTestCase {
         let out = StackReducer.sigmaClippedMean(imgs) // default kappa 2.0
         XCTAssertEqual(out[0, 0].x, 1.0, accuracy: 1e-4) // (0+0+0+0+5)/5 = 1.0, no clipping
     }
+
+    func testMeanIsPlainAverage() {
+        // Plain mean keeps every sample (no clipping) — even an extreme one.
+        let out = StackReducer.mean([flat(0.0), flat(0.4), flat(0.8), flat(10.0)])
+        XCTAssertEqual(out[0, 0].x, (0.0 + 0.4 + 0.8 + 10.0) / 4, accuracy: 1e-5)
+    }
 }

@@ -50,4 +50,19 @@ public enum StackReducer {
         }
         return out
     }
+
+    /// Plain per-pixel temporal mean — keeps scene motion (smooth-motion look).
+    public static func mean(_ imgs: [PixelImage]) -> PixelImage {
+        precondition(!imgs.isEmpty)
+        let w = imgs[0].width, h = imgs[0].height
+        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
+        var out = PixelImage(width: w, height: h)
+        let inv = 1 / Float(imgs.count)
+        for i in 0..<(w * h) {
+            var acc = SIMD3<Float>(0, 0, 0)
+            for im in imgs { acc += im.pixels[i] }
+            out.pixels[i] = acc * inv
+        }
+        return out
+    }
 }
