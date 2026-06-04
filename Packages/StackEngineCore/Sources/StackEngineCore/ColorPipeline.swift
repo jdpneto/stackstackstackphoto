@@ -56,3 +56,15 @@ func demosaic(_ lin: [Float], width w: Int, height h: Int, pattern: CFAPattern) 
     }
     return out
 }
+
+public enum ColorPipeline {
+    /// Develop a raw frame into a linear, working-space RGB image.
+    /// Order (normative, design §12): linearize → white balance → demosaic → color matrix.
+    public static func process(_ frame: RawSensorFrame) -> PixelImage {
+        let lin = linearizeAndBalance(frame)
+        var img = demosaic(lin, width: frame.width, height: frame.height, pattern: frame.cfa)
+        let m = frame.colorMatrix
+        for i in 0..<img.pixels.count { img.pixels[i] = m * img.pixels[i] }
+        return img
+    }
+}
