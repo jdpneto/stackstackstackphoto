@@ -1,13 +1,10 @@
 import SwiftUI
 import UIKit
+import Combine
 
 struct CaptureView: View {
-    @StateObject private var coordinator: StackCaptureCoordinator
+    @ObservedObject var coordinator: StackCaptureCoordinator
     @State private var lastResult: UIImage?
-
-    init(coordinator: StackCaptureCoordinator) {
-        _coordinator = StateObject(wrappedValue: coordinator)
-    }
 
     var body: some View {
         ZStack {
@@ -24,7 +21,10 @@ struct CaptureView: View {
                 shutterButton.padding(.bottom, 40)
             }
         }
-        .onChange(of: coordinator.state) { _ in loadResultIfDone() }
+        // Decode the finished JPEG once, from the coordinator's published result — no disk read.
+        .onReceive(coordinator.$lastResultJPEG) { data in
+            lastResult = data.flatMap { UIImage(data: $0) }
+        }
     }
 
     private var statusLabel: some View {
@@ -34,9 +34,9 @@ struct CaptureView: View {
             case .capturing: Text("Capturing…")
             case .processing: Text("Stacking…")
             case .done: Text("Done")
-            case .failed(let m): Text("Failed: \(m)").foregroundColor(.red)
+            case .failed(let m): Text("Failed: \(m)").foregroundColor(.red).multilineTextAlignment(.center)
             }
-        }.foregroundColor(.white)
+        }.foregroundColor(.white).padding(.horizontal)
     }
 
     private var shutterButton: some View {
@@ -52,14 +52,5 @@ struct CaptureView: View {
 
     private var isBusy: Bool {
         switch coordinator.state { case .capturing, .processing: return true; default: return false }
-    }
-
-    private func loadResultIfDone() {
-        guard case .done(let id) = coordinator.state else { return }
-        let store = LibraryStore()
-        if let rec = (try? store.loadAll())?.first(where: { $0.id == id }),
-           let data = try? Data(contentsOf: store.resultURL(for: rec)) {
-            lastResult = UIImage(data: data)
-        }
     }
 }

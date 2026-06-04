@@ -8,7 +8,11 @@ public enum Luma {
 
     /// Sharpness = sum of |Laplacian| over the luminance image (higher = sharper).
     public static func sharpness(_ img: PixelImage) -> Float {
-        let l = luminance(img), w = img.width, h = img.height
+        sharpness(of: luminance(img), width: img.width, height: img.height)
+    }
+
+    /// Sharpness over a precomputed luminance buffer, so callers can reuse the buffer.
+    static func sharpness(of l: [Float], width w: Int, height h: Int) -> Float {
         @inline(__always) func at(_ x: Int, _ y: Int) -> Float {
             l[min(max(y, 0), h - 1) * w + min(max(x, 0), w - 1)]
         }

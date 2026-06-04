@@ -1,7 +1,10 @@
 import XCTest
 
 final class StackFlowUITests: XCTestCase {
-    func testTapShutterProducesAStack() {
+    func testTapShutterProducesAStack() throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Relies on the Simulator fake-capture path; the device camera path needs permissions and real hardware.")
+        #endif
         let app = XCUIApplication()
         app.launch()
 

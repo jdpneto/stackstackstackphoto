@@ -1,6 +1,6 @@
 import simd
 
-public struct Translation: Equatable {
+public struct Translation: Equatable, Sendable {
     public let dx: Int
     public let dy: Int
     public init(dx: Int, dy: Int) { self.dx = dx; self.dy = dy }
@@ -12,15 +12,25 @@ public enum Alignment {
                                            moving mov: PixelImage,
                                            searchRange r: Int) -> Translation {
         precondition(ref.width == mov.width && ref.height == mov.height)
-        let lr = Luma.luminance(ref), lm = Luma.luminance(mov)
-        let w = ref.width, h = ref.height
+        return estimateTranslation(referenceLuma: Luma.luminance(ref),
+                                   movingLuma: Luma.luminance(mov),
+                                   width: ref.width, height: ref.height, searchRange: r)
+    }
+
+    /// Integer translation over precomputed luminance buffers (lets the pipeline reuse luma).
+    static func estimateTranslation(referenceLuma lr: [Float],
+                                    movingLuma lm: [Float],
+                                    width w: Int, height h: Int,
+                                    searchRange r: Int) -> Translation {
+        precondition(r >= 0, "searchRange must be >= 0")
         var best = Translation(dx: 0, dy: 0)
         var bestCost = Float.infinity
-        // Iterate from zero outward so ties are broken in favour of the smallest displacement.
+        // Iterate from zero outward (magnitude shells) so equal-cost ties are broken in
+        // favour of the SMALLEST displacement.
         for mag in 0...r {
             for dy in -mag...mag {
                 for dx in -mag...mag {
-                    guard abs(dx) == mag || abs(dy) == mag else { continue } // shell only
+                    guard abs(dx) == mag || abs(dy) == mag else { continue } // current shell only
                     var cost: Float = 0
                     var count: Float = 0
                     let yStart = max(0, -dy), yEnd = min(h, h - dy)

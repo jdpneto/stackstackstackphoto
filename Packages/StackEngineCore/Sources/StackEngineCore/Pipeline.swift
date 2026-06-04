@@ -8,13 +8,17 @@ public enum Pipeline {
                                             kappa: Float = 2.0) -> PixelImage {
         precondition(!imgs.isEmpty)
         if imgs.count == 1 { return imgs[0] }
-        let refIdx = ReferenceSelection.sharpestIndex(imgs)
-        let ref = imgs[refIdx]
+        let w = imgs[0].width, h = imgs[0].height
+        // Luminance is computed once per frame and reused for BOTH reference selection
+        // and per-frame alignment (previously recomputed several times).
+        let lumas = imgs.map { Luma.luminance($0) }
+        let refIdx = ReferenceSelection.sharpestIndex(lumas: lumas, width: w, height: h)
         var aligned = [PixelImage]()
         aligned.reserveCapacity(imgs.count)
         for (i, im) in imgs.enumerated() {
             if i == refIdx { aligned.append(im); continue }
-            let t = Alignment.estimateTranslation(reference: ref, moving: im, searchRange: searchRange)
+            let t = Alignment.estimateTranslation(referenceLuma: lumas[refIdx], movingLuma: lumas[i],
+                                                  width: w, height: h, searchRange: searchRange)
             aligned.append(Alignment.warp(im, by: t))
         }
         return StackReducer.sigmaClippedMean(aligned, kappa: kappa)

@@ -1,11 +1,11 @@
 import simd
 
-public enum CFAPattern: Equatable { case rggb, bggr, grbg, gbrg }
+public enum CFAPattern: Equatable, Sendable { case rggb, bggr, grbg, gbrg }
 
 enum CFAColor: Equatable { case red, green, blue }
 
 /// One captured raw Bayer frame plus the metadata needed to develop it.
-public struct RawSensorFrame {
+public struct RawSensorFrame: Sendable {
     public let width: Int
     public let height: Int
     public let mosaic: [UInt16]            // row-major, length width*height

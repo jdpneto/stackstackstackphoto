@@ -15,25 +15,37 @@ public enum StackReducer {
         precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
         let n = imgs.count
         var out = PixelImage(width: w, height: h)
+        // One reusable scratch buffer for the entire image, refilled per pixel/channel —
+        // avoids a heap allocation in the innermost loop (tens of millions on a large frame).
+        var kept = [Float](repeating: 0, count: n)
         for i in 0..<(w * h) {
             for ch in 0..<3 {
-                var kept = [Float](); kept.reserveCapacity(n)
-                for im in imgs { kept.append(im.pixels[i][ch]) }
+                for k in 0..<n { kept[k] = imgs[k].pixels[i][ch] }
+                var count = n
                 var iter = 0
-                while iter < iterations && kept.count > 2 {
-                    let mean = kept.reduce(0, +) / Float(kept.count)
-                    let varc = kept.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Float(kept.count)
-                    let sd = varc.squareRoot()
+                while iter < iterations && count > 2 {
+                    var sum: Float = 0
+                    for k in 0..<count { sum += kept[k] }
+                    let mean = sum / Float(count)
+                    var varSum: Float = 0
+                    for k in 0..<count { let d = kept[k] - mean; varSum += d * d }
+                    let sd = (varSum / Float(count)).squareRoot()
                     if sd == 0 { break }
-                    let filtered = kept.filter { abs($0 - mean) <= kappa * sd }
-                    if filtered.count < 3 { break }          // keep current set; too few survivors
-                    if filtered.count == kept.count { break } // converged
-                    kept = filtered
+                    let threshold = kappa * sd
+                    // Compact survivors to the front of `kept` in place (no allocation).
+                    var survivors = 0
+                    for k in 0..<count where abs(kept[k] - mean) <= threshold {
+                        kept[survivors] = kept[k]
+                        survivors += 1
+                    }
+                    if survivors < 3 { break }        // too few survivors — keep the current set
+                    if survivors == count { break }   // converged — nothing rejected
+                    count = survivors
                     iter += 1
                 }
-                // `kept` is never emptied: the loop breaks before dropping below 3 survivors,
-                // and for N <= 2 it never runs — so the mean of `kept` is always well-defined.
-                out.pixels[i][ch] = kept.reduce(0, +) / Float(kept.count)
+                var sum: Float = 0
+                for k in 0..<count { sum += kept[k] }
+                out.pixels[i][ch] = sum / Float(count)
             }
         }
         return out
