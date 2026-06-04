@@ -20,9 +20,14 @@ public struct RawSensorFrame {
                 wbGains: SIMD3<Float> = SIMD3<Float>(1, 1, 1),
                 colorMatrix: simd_float3x3 = matrix_identity_float3x3) {
         precondition(mosaic.count == width * height, "mosaic count mismatch")
-        self.width = width; self.height = height; self.mosaic = mosaic
-        self.blackLevel = blackLevel; self.whiteLevel = whiteLevel; self.cfa = cfa
-        self.wbGains = wbGains; self.colorMatrix = colorMatrix
+        self.width = width
+        self.height = height
+        self.mosaic = mosaic
+        self.blackLevel = blackLevel
+        self.whiteLevel = whiteLevel
+        self.cfa = cfa
+        self.wbGains = wbGains
+        self.colorMatrix = colorMatrix
     }
 }
 

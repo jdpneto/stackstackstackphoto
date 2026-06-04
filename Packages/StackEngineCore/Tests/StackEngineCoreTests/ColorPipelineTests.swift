@@ -38,6 +38,26 @@ final class ColorPipelineTests: XCTestCase {
         }
     }
 
+    func testBilinearDemosaicNonUniformNeighbors() {
+        // 4x4 RGGB, deliberately non-linear field so the exact neighbor sets matter.
+        let w = 4, h = 4
+        let lin: [Float] = [
+            10, 25, 30, 12,
+            40, 60, 55, 18,
+            70, 100, 90, 33,
+            22, 44, 66, 88,
+        ]
+        let img = demosaic(lin, width: w, height: h, pattern: .rggb)
+        // Green site (1,2): horizontal neighbors are R, vertical neighbors are B.
+        XCTAssertEqual(img[1, 2].x, 80, accuracy: 1e-3)    // r = (70+90)/2
+        XCTAssertEqual(img[1, 2].y, 100, accuracy: 1e-3)   // g = site value
+        XCTAssertEqual(img[1, 2].z, 52, accuracy: 1e-3)    // b = (60+44)/2
+        // Red site (2,2): g = 4-neighbor avg, b = 4-diagonal avg.
+        XCTAssertEqual(img[2, 2].x, 90, accuracy: 1e-3)    // r = site
+        XCTAssertEqual(img[2, 2].y, 63.5, accuracy: 1e-3)  // g = (100+33+55+66)/4
+        XCTAssertEqual(img[2, 2].z, 52.5, accuracy: 1e-3)  // b = (60+18+44+88)/4
+    }
+
     func testProcessAppliesColorMatrix() {
         // 4x4 RGGB uniform raw -> linear 0.5 at every site; gains=1.
         // Color matrix swaps R and B channels.
