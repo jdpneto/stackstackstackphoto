@@ -3,6 +3,22 @@ import simd
 @testable import StackEngineCore
 
 final class OutputTransformTests: XCTestCase {
+    func testSRGBRoundTripWithinQuantization() {
+        // linear → sRGB8 → linear should return ~the original (8-bit quantization tolerance).
+        let img = PixelImage(width: 3, height: 1, pixels: [
+            SIMD3<Float>(0.0, 0.25, 0.5),
+            SIMD3<Float>(0.5, 0.75, 1.0),
+            SIMD3<Float>(0.1, 0.2, 0.9),
+        ])
+        let back = OutputTransform.decodeSRGB8(OutputTransform.encodeSRGB8(img), width: 3, height: 1)
+        XCTAssertEqual(back.pixels.count, 3)
+        for i in 0..<3 {
+            for ch in 0..<3 {
+                XCTAssertEqual(back.pixels[i][ch], img.pixels[i][ch], accuracy: 0.01, "pixel \(i) ch \(ch)")
+            }
+        }
+    }
+
     func testSRGBEncodingKnownValues() {
         let img = PixelImage(width: 3, height: 1, pixels: [
             SIMD3<Float>(0, 0, 0),

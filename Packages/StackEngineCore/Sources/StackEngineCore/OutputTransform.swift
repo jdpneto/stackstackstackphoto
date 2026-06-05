@@ -8,6 +8,22 @@ public enum OutputTransform {
         return Float(1.055 * Foundation.pow(Double(x), 1.0 / 2.4) - 0.055)
     }
 
+    @inline(__always) private static func srgbToLinear(_ b: UInt8) -> Float {
+        let c = Float(b) / 255
+        if c <= 0.04045 { return c / 12.92 }
+        return Float(Foundation.pow((Double(c) + 0.055) / 1.055, 2.4))
+    }
+
+    /// Decode interleaved sRGB RGBA8 bytes back into a linear image (inverse of `encodeSRGB8`).
+    public static func decodeSRGB8(_ rgba8: [UInt8], width: Int, height: Int) -> PixelImage {
+        precondition(rgba8.count == width * height * 4, "rgba8 length mismatch")
+        var pixels = [SIMD3<Float>](repeating: .zero, count: width * height)
+        for i in 0..<(width * height) {
+            pixels[i] = SIMD3<Float>(srgbToLinear(rgba8[i*4]), srgbToLinear(rgba8[i*4+1]), srgbToLinear(rgba8[i*4+2]))
+        }
+        return PixelImage(width: width, height: height, pixels: pixels)
+    }
+
     /// Encode a linear image to interleaved sRGB RGBA8 bytes (alpha = 255).
     public static func encodeSRGB8(_ img: PixelImage) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: img.pixels.count * 4)
