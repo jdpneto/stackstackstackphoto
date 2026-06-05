@@ -114,12 +114,15 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     }
 
     /// Watchdog: a capture that hasn't reported back within `perFrameTimeout` is treated as a stall.
-    /// END the burst with the frames gathered so far — do NOT advance, because firing the next
-    /// capture while a stalled (but maybe still-in-flight) request lingers would re-create the very
-    /// overlap (FigCapture -12773) this sequential design exists to avoid. Must run on `stateQueue`.
+    /// Stop requesting NEW frames (don't advance — firing the next capture while a stalled, maybe
+    /// still-in-flight request lingers would re-create the FigCapture -12773 overlap this sequential
+    /// design avoids), but still wait for any already-captured frames to finish converting off-queue
+    /// before resuming, so we don't drop them. Must run on `stateQueue`.
     private func timeoutFrameLocked(stuckID: Int64) {
         guard self.continuation != nil, self.currentID == stuckID else { return }   // already advanced
-        self.finishLocked()
+        self.currentID = nil
+        self.remaining = 0            // request no more frames…
+        self.maybeFinishLocked()      // …but finish only once outstanding conversions drain
     }
 
     /// Mark the in-flight capture `completedID` finished, then immediately request the next frame
