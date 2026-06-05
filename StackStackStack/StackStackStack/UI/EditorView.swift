@@ -38,6 +38,16 @@ struct EditorView: View {
                 slider("Contrast", value: $adj.contrast, range: -1...1)
                 slider("Warmth", value: $adj.temperature, range: -1...1)
                 slider("Tint", value: $adj.tint, range: -1...1)
+                slider("Shadows", value: $adj.shadows, range: -1...1)
+                slider("Highlights", value: $adj.highlights, range: -1...1)
+                slider("Straighten", value: $adj.straightenDegrees, range: -15...15)
+                Picker("Crop", selection: $adj.cropAspect) {
+                    ForEach(CropAspect.allCases, id: \.self) { Text($0.shortLabel).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                // The segmented Picker has no editing-changed callback, so re-render on selection.
+                .onChange(of: adj.cropAspect) { _ in schedulePreview() }
             }
             .navigationTitle("Edit")
             .navigationBarTitleDisplayMode(.inline)
@@ -93,6 +103,18 @@ struct EditorView: View {
             }
             onSaved(rendered)   // hand the rendered bytes back directly — no disk re-read
             dismiss()
+        }
+    }
+}
+
+extension CropAspect {
+    /// Short label for the crop segmented control.
+    var shortLabel: String {
+        switch self {
+        case .original:    return "Original"
+        case .square:      return "Square"
+        case .fourThree:   return "4:3"
+        case .sixteenNine: return "16:9"
         }
     }
 }

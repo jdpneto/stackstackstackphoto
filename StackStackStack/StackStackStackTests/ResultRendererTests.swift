@@ -29,4 +29,17 @@ final class ResultRendererTests: XCTestCase {
         XCTAssertLessThanOrEqual(max(w, h), 16)   // preview path downscaled to <= maxPixel
         XCTAssertGreaterThan(w, 0)
     }
+
+    func testRenderWithCropProducesCroppedDimensions() throws {
+        // Regression: a square crop changes the image dimensions; the encoder must use the
+        // adjusted size, not the stale decode size (else the pixel buffer mismatches w*h).
+        let img = PixelImage(width: 16, height: 8, fill: SIMD3<Float>(0.5, 0.5, 0.5))
+        let jpeg = try ImageEncoder.encode(rgba8: OutputTransform.encodeSRGB8(img),
+                                           width: 16, height: 8, format: .jpeg, quality: 1.0)
+        let rendered = try XCTUnwrap(ResultRenderer.render(originalJPEG: jpeg,
+                                                           adjustments: ImageAdjustments(cropAspect: .square)))
+        let (rgba, w, h) = try XCTUnwrap(ImageDecoder.rgba8(from: rendered))
+        XCTAssertEqual(w, 8); XCTAssertEqual(h, 8)        // centre-cropped to the smaller side
+        XCTAssertEqual(rgba.count, w * h * 4)             // buffer matches the reported dimensions
+    }
 }
