@@ -213,9 +213,10 @@ public enum ImageEditor {
     /// Order: exposure → white balance → contrast (around the 18% pivot). Output is clamped ≥ 0.
     public static func apply(_ adj: ImageAdjustments, to img: PixelImage) -> PixelImage {
         if adj.isIdentity { return img }
-        let expGain = Float(exp2(Double(adj.exposureEV)))
-        let contrastFactor = 1 + adj.contrast
-        let wb = SIMD3<Float>(1 + adj.temperature * 0.3, 1 + adj.tint * 0.3, 1 - adj.temperature * 0.3)
+        let expGain = Float(exp2(Double(adj.exposureEV)))   // UI constrains EV to ±2; Float32 overflows above ~128
+        let contrastFactor = 1 + max(-0.9, min(1, adj.contrast))   // clamp so contrast = -1 doesn't collapse to flat grey
+        // tint is magenta(+)/green(-): positive tint REDUCES green.
+        let wb = SIMD3<Float>(1 + adj.temperature * 0.3, 1 - adj.tint * 0.3, 1 - adj.temperature * 0.3)
         let pivotVec = SIMD3<Float>(repeating: pivot)
         let zero = SIMD3<Float>(repeating: 0)
         var out = img
