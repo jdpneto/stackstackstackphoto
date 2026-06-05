@@ -19,6 +19,64 @@ public enum AffineAligner {
         return out
     }
 
+    /// Estimate the similarity transform that best aligns `moving` to `reference`, minimising luma
+    /// SSD. Coarse integer-translation init (reuses Alignment.estimateTranslation) then a
+    /// deterministic Hooke–Jeeves pattern search over scale / rotation / sub-pixel translation.
+    public static func estimate(reference ref: PixelImage, moving mov: PixelImage,
+                                translationSearch: Int = 8) -> Transform2D {
+        precondition(ref.width == mov.width && ref.height == mov.height)
+        let w = ref.width, h = ref.height
+        let refL = Luma.luminance(ref), movL = Luma.luminance(mov)
+
+        // Coarse integer translation handles handheld shift; the search refines the rest.
+        let t0 = Alignment.estimateTranslation(referenceLuma: refL, movingLuma: movL,
+                                               width: w, height: h, searchRange: translationSearch)
+        var s: Float = 1, r: Float = 0, tx = Float(t0.dx), ty = Float(t0.dy)
+
+        func cost(_ s: Float, _ r: Float, _ tx: Float, _ ty: Float) -> Float {
+            ssdWarped(movL, refL, width: w, height: h,
+                      by: .similarity(scale: s, rotation: r, tx: tx, ty: ty))
+        }
+
+        var best = cost(s, r, tx, ty)
+        var stepS: Float = 0.05, stepR: Float = 0.04, stepT: Float = 1.0
+        var guardCount = 0
+        while stepT > 0.01 && guardCount < 300 {
+            guardCount += 1
+            var improved = false
+            let trials: [(Float, Float, Float, Float)] = [
+                ( stepS, 0, 0, 0), (-stepS, 0, 0, 0),
+                (0,  stepR, 0, 0), (0, -stepR, 0, 0),
+                (0, 0,  stepT, 0), (0, 0, -stepT, 0),
+                (0, 0, 0,  stepT), (0, 0, 0, -stepT),
+            ]
+            for (dS, dR, dTx, dTy) in trials {
+                let c = cost(s + dS, r + dR, tx + dTx, ty + dTy)
+                if c < best - 1e-9 {
+                    best = c; s += dS; r += dR; tx += dTx; ty += dTy; improved = true
+                }
+            }
+            if !improved { stepS *= 0.5; stepR *= 0.5; stepT *= 0.5 }
+        }
+        return .similarity(scale: s, rotation: r, tx: tx, ty: ty)
+    }
+
+    /// Mean SSD between `reference` luma and `moving` luma warped by `t` (centred, bilinear).
+    private static func ssdWarped(_ movL: [Float], _ refL: [Float], width w: Int, height h: Int,
+                                  by t: Transform2D) -> Float {
+        let cx = Float(w - 1) / 2, cy = Float(h - 1) / 2
+        var sum: Float = 0
+        for y in 0..<h {
+            for x in 0..<w {
+                let p = t.apply(Float(x) - cx, Float(y) - cy)
+                let m = sampleLuma(movL, width: w, height: h, p.x + cx, p.y + cy)
+                let d = m - refL[y * w + x]
+                sum += d * d
+            }
+        }
+        return sum / Float(w * h)
+    }
+
     // MARK: - Private samplers (bilinear, edge-clamped)
 
     static func sampleRGB(_ img: PixelImage, _ fx: Float, _ fy: Float) -> SIMD3<Float> {
