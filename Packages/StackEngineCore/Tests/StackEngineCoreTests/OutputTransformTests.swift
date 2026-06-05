@@ -14,7 +14,7 @@ final class OutputTransformTests: XCTestCase {
         XCTAssertEqual(back.pixels.count, 3)
         for i in 0..<3 {
             for ch in 0..<3 {
-                XCTAssertEqual(back.pixels[i][ch], img.pixels[i][ch], accuracy: 0.01, "pixel \(i) ch \(ch)")
+                XCTAssertEqual(back.pixels[i][ch], img.pixels[i][ch], accuracy: 0.006, "pixel \(i) ch \(ch)")
             }
         }
     }

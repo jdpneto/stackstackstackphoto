@@ -15,6 +15,7 @@ public enum OutputTransform {
     }
 
     /// Decode interleaved sRGB RGBA8 bytes back into a linear image (inverse of `encodeSRGB8`).
+    /// The alpha byte (i*4+3) is ignored — developed results are always opaque.
     public static func decodeSRGB8(_ rgba8: [UInt8], width: Int, height: Int) -> PixelImage {
         precondition(rgba8.count == width * height * 4, "rgba8 length mismatch")
         var pixels = [SIMD3<Float>](repeating: .zero, count: width * height)
