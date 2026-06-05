@@ -46,7 +46,7 @@ public enum Pipeline {
     /// Halve (Gaussian reduce) each frame until its long edge is within `maxEdge` (nil = no downscale).
     /// Frames start equal-size and reduce deterministically, so they stay equal-size.
     private static func downscale(_ imgs: [PixelImage], maxEdge: Int?) -> [PixelImage] {
-        guard let maxEdge else { return imgs }
+        guard let maxEdge, maxEdge >= 1 else { return imgs }   // <1 would loop forever (reduce floors at 1)
         return imgs.map { img in
             var out = img
             while max(out.width, out.height) > maxEdge { out = ImagePyramid.reduce(out) }

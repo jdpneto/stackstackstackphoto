@@ -56,6 +56,9 @@ public enum Alignment {
     /// O(image × searchRange²) — the key to making full-resolution alignment fast on device.
     /// Collapses to a single-level `±maxShift` box search when the image is already small (so it
     /// matches `estimateTranslation` for small inputs), and returns identity for `maxShift <= 0`.
+    /// Matches the full-resolution search on real content (textured scene + noise); it can diverge
+    /// only on pathologically smooth/periodic inputs (pure gradients, sinusoids) where translation
+    /// estimation is ill-posed regardless — a non-issue for photos.
     static func estimateTranslationCoarseToFine(referenceLuma lr: [Float], movingLuma lm: [Float],
                                                 width w: Int, height h: Int,
                                                 maxShift: Int, minDim: Int = 64) -> Translation {
