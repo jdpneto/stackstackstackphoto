@@ -12,4 +12,14 @@ final class ImageEncoderTests: XCTestCase {
         // JPEG magic bytes
         XCTAssertEqual(data[0], 0xFF); XCTAssertEqual(data[1], 0xD8)
     }
+
+    func testEncodeRejectsBufferSizeMismatch() {
+        // Buffer too small for the declared 2×2 (would be an OOB read in CGContext) → throws, not crashes.
+        let tooSmall = [UInt8](repeating: 0, count: 2 * 2 * 4 - 4)
+        XCTAssertThrowsError(try ImageEncoder.encode(rgba8: tooSmall, width: 2, height: 2,
+                                                     format: .jpeg, quality: 1.0))
+        // Zero dimensions are rejected too.
+        XCTAssertThrowsError(try ImageEncoder.encode(rgba8: [], width: 0, height: 0,
+                                                     format: .jpeg, quality: 1.0))
+    }
 }
