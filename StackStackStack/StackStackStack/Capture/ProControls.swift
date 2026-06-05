@@ -6,5 +6,4 @@ struct ProControls: Sendable, Equatable {
     var focus: Double?          // manual lens position, 0 (near) … 1 (far)
 
     static let auto = ProControls()
-    var isAuto: Bool { self == .auto }
 }

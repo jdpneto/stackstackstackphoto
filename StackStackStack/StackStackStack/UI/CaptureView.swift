@@ -106,7 +106,10 @@ struct CaptureView: View {
                     optControl("Frames", unit: "",
                                binding: Binding(get: { coordinator.pro.frameCount.map(Double.init) },
                                                 set: { coordinator.pro.frameCount = $0.map { Int($0.rounded()) } }),
-                               range: 2...40, step: 1, defaultValue: 12) { "\(Int($0))" }
+                               range: 2...40, step: 1,
+                               // Default to the current look's burst length so enabling the control
+                               // doesn't silently change it; the user adjusts from there.
+                               defaultValue: Double(CaptureRecipe.recipe(for: coordinator.mode).frameCount)) { "\(Int($0))" }
                     optControl("ISO", unit: "",
                                binding: $coordinator.pro.iso, range: 50...3200, step: 10, defaultValue: 400) { "\(Int($0))" }
                     optControl("Shutter", unit: "s",
