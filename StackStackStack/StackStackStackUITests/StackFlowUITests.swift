@@ -23,4 +23,31 @@ final class StackFlowUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+
+    func testEditorOpensAfterCapture() throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Relies on the Simulator fake-capture path; the device camera path needs permissions and real hardware.")
+        #endif
+        let app = XCUIApplication()
+        app.launch()
+
+        let shutter = app.buttons["shutter"]
+        XCTAssertTrue(shutter.waitForExistence(timeout: 10), "shutter button not found")
+        shutter.tap()
+        XCTAssertTrue(app.staticTexts["Done"].waitForExistence(timeout: 60), "stack did not complete")
+
+        let edit = app.buttons["Edit"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5), "Edit button not found")
+        edit.tap()
+
+        // The editor sheet shows the adjustment sliders + Save.
+        XCTAssertTrue(app.buttons["Save"].waitForExistence(timeout: 10), "editor did not open")
+        XCTAssertTrue(app.staticTexts["Exposure"].exists)
+
+        let shot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: shot)
+        attachment.name = "editor-screen"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
 }

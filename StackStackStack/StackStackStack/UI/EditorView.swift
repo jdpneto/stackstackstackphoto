@@ -1,0 +1,98 @@
+import SwiftUI
+import UIKit
+import StackEngineCore
+
+/// Non-destructive tonal editor (design §14): exposure / contrast / white balance with a
+/// downscaled live preview rendered off the main thread. Save persists the adjustments + result.
+struct EditorView: View {
+    let originalJPEG: Data
+    let recordId: UUID
+    let store: LibraryStore
+    var onSaved: (Data) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var adj: ImageAdjustments
+    @State private var preview: UIImage?
+    @State private var renderTask: Task<Void, Never>?
+    @State private var isSaving = false
+    @State private var saveError = false
+
+    init(originalJPEG: Data, recordId: UUID, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
+        self.originalJPEG = originalJPEG
+        self.recordId = recordId
+        self.store = store
+        self.onSaved = onSaved
+        _adj = State(initialValue: store.adjustments(for: recordId))
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack {
+                Group {
+                    if let preview { Image(uiImage: preview).resizable().scaledToFit() }
+                    else if let ui = UIImage(data: originalJPEG) { Image(uiImage: ui).resizable().scaledToFit() }
+                }
+                .padding()
+                Spacer()
+                slider("Exposure", value: $adj.exposureEV, range: -2...2)
+                slider("Contrast", value: $adj.contrast, range: -1...1)
+                slider("Warmth", value: $adj.temperature, range: -1...1)
+                slider("Tint", value: $adj.tint, range: -1...1)
+            }
+            .navigationTitle("Edit")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(isSaving) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(isSaving) }
+            }
+            .onAppear { schedulePreview() }
+            .alert("Couldn't save the edit", isPresented: $saveError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("The image couldn't be processed. Please try again.")
+            }
+        }
+    }
+
+    private func slider(_ label: String, value: Binding<Float>, range: ClosedRange<Float>) -> some View {
+        HStack {
+            Text(label).frame(width: 80, alignment: .leading)
+            // Re-render the preview when the user finishes dragging (not on every tick).
+            Slider(value: value, in: range, onEditingChanged: { editing in if !editing { schedulePreview() } })
+        }.padding(.horizontal)
+    }
+
+    /// Render a downscaled preview off the main thread, cancelling any in-flight render.
+    private func schedulePreview() {
+        renderTask?.cancel()
+        let current = adj, jpeg = originalJPEG
+        renderTask = Task {
+            let data = await Task.detached(priority: .userInitiated) {
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200)
+            }.value
+            if Task.isCancelled { return }
+            preview = data.flatMap { UIImage(data: $0) }
+        }
+    }
+
+    private func save() {
+        guard !isSaving else { return }   // reject a re-entrant Save while one is in flight
+        isSaving = true
+        let current = adj, jpeg = originalJPEG, theStore = store, id = recordId
+        Task {
+            let rendered = await Task.detached(priority: .userInitiated) {
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.95)
+            }.value
+            isSaving = false
+            guard let rendered else { saveError = true; return }   // don't claim success on a failed render
+            do {
+                try theStore.applyEdit(id: id, adjustments: current, renderedJPEG: rendered)
+            } catch {
+                saveError = true
+                return
+            }
+            onSaved(rendered)   // hand the rendered bytes back directly — no disk re-read
+            dismiss()
+        }
+    }
+}

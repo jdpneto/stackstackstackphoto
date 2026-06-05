@@ -11,6 +11,10 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published private(set) var lastResultJPEG: Data?
     /// The currently selected look. Settable from the capture UI.
     @Published var mode: StackMode = .noiseReduction
+    /// The id of the most recent saved stack (for the editor).
+    @Published private(set) var lastSavedID: UUID?
+    /// Read-only access to the library for the editor.
+    var library: LibraryStore { store }
 
     private let capture: CaptureService
     private let store: LibraryStore
@@ -36,6 +40,7 @@ final class StackCaptureCoordinator: ObservableObject {
             let jpeg = try await Self.makeJPEG(from: frames, mode: mode)   // heavy work, off the main actor
             lastResultJPEG = jpeg
             let saved = try store.save(resultJPEG: jpeg, mode: mode.rawValue, frameCount: frames.count)
+            lastSavedID = saved.id
             state = .done(saved.id)
         } catch {
             state = .failed(error.localizedDescription)

@@ -1,4 +1,5 @@
 import Foundation
+import StackEngineCore
 
 /// Minimal file-backed library: JPEG results + a JSON index in the given root.
 final class LibraryStore {
@@ -25,6 +26,7 @@ final class LibraryStore {
         let fileName = "\(id.uuidString).jpg"
         let url = root.appendingPathComponent(fileName)
         try resultJPEG.write(to: url)
+        try resultJPEG.write(to: originalURL(for: id))   // immutable original for re-editing
         var records = (try? loadAll()) ?? []
         records.insert(StackRecord(id: id, createdAt: Date(), mode: mode,
                                    frameCount: frameCount, resultFileName: fileName), at: 0)
@@ -38,6 +40,31 @@ final class LibraryStore {
     }
 
     func resultURL(for record: StackRecord) -> URL { record.resultURL(in: root) }
+
+    private func originalURL(for id: UUID) -> URL {
+        root.appendingPathComponent("\(id.uuidString).orig.jpg")
+    }
+    private func editsURL(for id: UUID) -> URL {
+        root.appendingPathComponent("\(id.uuidString).edits.json")
+    }
+
+    /// The immutable original stacked JPEG, used as the editing source.
+    func originalData(for id: UUID) -> Data? {
+        try? Data(contentsOf: originalURL(for: id))
+    }
+
+    /// The persisted adjustments for a record (identity if none).
+    func adjustments(for id: UUID) -> ImageAdjustments {
+        guard let data = try? Data(contentsOf: editsURL(for: id)),
+              let adj = try? JSONDecoder().decode(ImageAdjustments.self, from: data) else { return .identity }
+        return adj
+    }
+
+    /// Overwrite the displayed JPEG with a rendered result and persist the adjustments.
+    func applyEdit(id: UUID, adjustments: ImageAdjustments, renderedJPEG: Data) throws {
+        try renderedJPEG.write(to: root.appendingPathComponent("\(id.uuidString).jpg"))
+        try JSONEncoder().encode(adjustments).write(to: editsURL(for: id))
+    }
 
     private func persist(_ records: [StackRecord]) throws {
         let data = try JSONEncoder().encode(records)

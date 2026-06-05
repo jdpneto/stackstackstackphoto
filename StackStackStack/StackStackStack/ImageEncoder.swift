@@ -14,7 +14,7 @@ enum ImageEncoder {
     static func encode(rgba8: [UInt8], width: Int, height: Int,
                        format: Format, quality: Double) throws -> Data {
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-        let bitmapInfo = CGImageAlphaInfo.noneSkipLast.rawValue // ignore alpha
+        let bitmapInfo = CGImageAlphaInfo.noneSkipLast.rawValue | CGImageByteOrderInfo.order32Big.rawValue // RGBX, explicit byte order
         var bytes = rgba8
         guard let ctx = CGContext(data: &bytes, width: width, height: height,
                                   bitsPerComponent: 8, bytesPerRow: width * 4,

@@ -6,6 +6,7 @@ import StackEngineCore
 struct CaptureView: View {
     @ObservedObject var coordinator: StackCaptureCoordinator
     @State private var lastResult: UIImage?
+    @State private var showEditor = false
 
     var body: some View {
         ZStack {
@@ -13,7 +14,13 @@ struct CaptureView: View {
             VStack {
                 Spacer()
                 if let img = lastResult {
-                    Image(uiImage: img).resizable().scaledToFit().padding()
+                    VStack {
+                        Image(uiImage: img).resizable().scaledToFit()
+                        if coordinator.lastSavedID != nil {
+                            Button("Edit") { showEditor = true }
+                                .buttonStyle(.bordered).tint(.white)
+                        }
+                    }.padding()
                 } else {
                     Text(coordinator.mode.shortLabel).foregroundColor(.white).font(.title3)
                 }
@@ -27,9 +34,18 @@ struct CaptureView: View {
         .onReceive(coordinator.$lastResultJPEG) { data in
             lastResult = data.flatMap { UIImage(data: $0) }
         }
-        // Changing the look clears the stale result so the centre shows the newly selected look.
-        // (onReceive + removeDuplicates is warning-free on the iOS 16 target, unlike onChange(of:perform:).)
-        .onReceive(coordinator.$mode.removeDuplicates()) { _ in lastResult = nil }
+        .sheet(isPresented: $showEditor) {
+            if let id = coordinator.lastSavedID, let original = coordinator.library.originalData(for: id) {
+                EditorView(originalJPEG: original, recordId: id, store: coordinator.library) { renderedJPEG in
+                    lastResult = UIImage(data: renderedJPEG)   // reflect the edit directly — no disk read
+                }
+            } else {
+                VStack(spacing: 16) {
+                    Text("Couldn't open the editor.").font(.headline)
+                    Button("Close") { showEditor = false }
+                }.padding()
+            }
+        }
     }
 
     private var statusLabel: some View {
@@ -58,7 +74,10 @@ struct CaptureView: View {
     private var lookPicker: some View {
         HStack(spacing: 8) {
             ForEach(StackMode.allCases, id: \.self) { m in
-                Button { coordinator.mode = m } label: {
+                Button {
+                    if coordinator.mode != m { lastResult = nil }   // changing the look drops the stale result
+                    coordinator.mode = m
+                } label: {
                     Text(m.shortLabel)
                         .font(.caption)
                         .fontWeight(coordinator.mode == m ? .bold : .regular)
