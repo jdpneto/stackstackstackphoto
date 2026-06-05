@@ -6,6 +6,7 @@ import StackEngineCore
 struct CaptureView: View {
     @ObservedObject var coordinator: StackCaptureCoordinator
     @State private var lastResult: UIImage?
+    @State private var showEditor = false
 
     var body: some View {
         ZStack {
@@ -13,7 +14,13 @@ struct CaptureView: View {
             VStack {
                 Spacer()
                 if let img = lastResult {
-                    Image(uiImage: img).resizable().scaledToFit().padding()
+                    VStack {
+                        Image(uiImage: img).resizable().scaledToFit()
+                        if coordinator.lastSavedID != nil {
+                            Button("Edit") { showEditor = true }
+                                .buttonStyle(.bordered).tint(.white)
+                        }
+                    }.padding()
                 } else {
                     Text(coordinator.mode.shortLabel).foregroundColor(.white).font(.title3)
                 }
@@ -27,9 +34,16 @@ struct CaptureView: View {
         .onReceive(coordinator.$lastResultJPEG) { data in
             lastResult = data.flatMap { UIImage(data: $0) }
         }
-        // Changing the look clears the stale result so the centre shows the newly selected look.
-        // (onReceive + removeDuplicates is warning-free on the iOS 16 target, unlike onChange(of:perform:).)
-        .onReceive(coordinator.$mode.removeDuplicates()) { _ in lastResult = nil }
+        .sheet(isPresented: $showEditor) {
+            if let id = coordinator.lastSavedID, let original = coordinator.library.originalData(for: id) {
+                EditorView(originalJPEG: original, recordId: id, store: coordinator.library) {
+                    // Reflect the saved edit in the on-screen result.
+                    if let data = try? Data(contentsOf: coordinator.library.resultURL(forID: id)) {
+                        lastResult = UIImage(data: data)
+                    }
+                }
+            }
+        }
     }
 
     private var statusLabel: some View {
