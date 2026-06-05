@@ -27,6 +27,8 @@ struct CaptureView: View {
         .onReceive(coordinator.$lastResultJPEG) { data in
             lastResult = data.flatMap { UIImage(data: $0) }
         }
+        // Changing the look clears the stale result so the centre shows the newly selected look.
+        .onChange(of: coordinator.mode) { _ in lastResult = nil }
     }
 
     private var statusLabel: some View {
@@ -48,12 +50,8 @@ struct CaptureView: View {
             Circle().fill(.white).frame(width: 72, height: 72)
                 .overlay(Circle().stroke(.gray, lineWidth: 4))
         }
-        .disabled(isBusy)
+        .disabled(coordinator.isBusy)
         .accessibilityIdentifier("shutter")
-    }
-
-    private var isBusy: Bool {
-        switch coordinator.state { case .capturing, .processing: return true; default: return false }
     }
 
     private var lookPicker: some View {
@@ -69,7 +67,7 @@ struct CaptureView: View {
                         .clipShape(Capsule())
                 }
                 .accessibilityIdentifier("look-\(m)")
-                .disabled(isBusy)
+                .disabled(coordinator.isBusy)
             }
         }
         .padding(.bottom, 8)
