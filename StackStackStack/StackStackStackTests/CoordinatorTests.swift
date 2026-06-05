@@ -8,7 +8,7 @@ final class CoordinatorTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = LibraryStore(rootDirectory: dir)
         let coord = StackCaptureCoordinator(capture: FakeCaptureService(width: 16, height: 16), store: store)
-        await coord.shoot(frameCount: 6)
+        await coord.shoot()
         if case .done = coord.state {} else { XCTFail("expected .done, got \(coord.state)") }
         XCTAssertEqual(try store.loadAll().count, 1)
     }
@@ -19,7 +19,7 @@ final class CoordinatorTests: XCTestCase {
         let store = LibraryStore(rootDirectory: dir)
         let coord = StackCaptureCoordinator(capture: FakeCaptureService(width: 16, height: 16), store: store)
         coord.mode = .smoothMotion
-        await coord.shoot(frameCount: 6)
+        await coord.shoot()
         if case .done = coord.state {} else { XCTFail("expected .done, got \(coord.state)") }
         XCTAssertEqual(try store.loadAll().count, 1)
     }
@@ -29,8 +29,8 @@ final class CoordinatorTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = LibraryStore(rootDirectory: dir)
         let coord = StackCaptureCoordinator(capture: FakeCaptureService(width: 16, height: 16), store: store)
-        async let a: Void = coord.shoot(frameCount: 4)
-        async let b: Void = coord.shoot(frameCount: 4)
+        async let a: Void = coord.shoot()
+        async let b: Void = coord.shoot()
         _ = await (a, b)
         // The re-entrancy guard drops the second concurrent shoot → exactly one save.
         XCTAssertEqual(try store.loadAll().count, 1)

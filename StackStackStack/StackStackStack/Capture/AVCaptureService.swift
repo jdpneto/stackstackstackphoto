@@ -41,26 +41,32 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     // Touched only on sessionQueue.
     private var configured = false
 
-    func captureBurst(mode: CaptureMode, frameCount: Int) async throws -> [RawSensorFrame] {
+    func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
         try await ensureAuthorized()
         try await ensureConfigured()
         guard !output.availableRawPhotoPixelFormatTypes.isEmpty else { throw CaptureError.noRawFormat }
         try lockExposureAndFocus()
 
+        let frameCount = recipe.frameCount
+        // Spread the captures across the recipe's window so long-exposure looks sample motion over
+        // time, rather than firing a back-to-back still burst. (Device path — verify on hardware.)
+        let interval = recipe.durationSeconds / Double(max(frameCount - 1, 1))
+
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[RawSensorFrame], Error>) in
             stateQueue.async {
                 guard self.continuation == nil else { cont.resume(throwing: CaptureError.busy); return }
+                guard frameCount > 0, let rawType = self.output.availableRawPhotoPixelFormatTypes.first else {
+                    cont.resume(throwing: CaptureError.noFramesProduced); return
+                }
                 self.pending = []
                 self.continuation = cont
-                var submitted = 0
-                for _ in 0..<frameCount {
-                    guard let rawType = self.output.availableRawPhotoPixelFormatTypes.first else { break }
+                self.remaining = frameCount
+                for i in 0..<frameCount {
                     let settings = AVCapturePhotoSettings(rawPixelFormatType: rawType)
-                    self.output.capturePhoto(with: settings, delegate: self)
-                    submitted += 1
+                    self.sessionQueue.asyncAfter(deadline: .now() + interval * Double(i)) {
+                        self.output.capturePhoto(with: settings, delegate: self)
+                    }
                 }
-                self.remaining = submitted
-                if submitted == 0 { self.finishLocked() }  // no callbacks will arrive
             }
         }
     }

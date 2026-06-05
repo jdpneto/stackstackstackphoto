@@ -29,12 +29,12 @@ final class StackCaptureCoordinator: ObservableObject {
         switch state { case .capturing, .processing: return true; default: return false }
     }
 
-    func shoot(frameCount: Int = 8) async {
+    func shoot() async {
         guard !isBusy else { return }   // reject a second shoot while one is already running
         let mode = self.mode            // capture the selected look at shutter-press time (before any await)
         do {
             state = .capturing
-            let frames = try await capture.captureBurst(mode: .noiseReduction, frameCount: frameCount)
+            let frames = try await capture.captureBurst(recipe: .recipe(for: mode))
             guard !frames.isEmpty else { state = .failed("No frames were captured."); return }
             state = .processing
             let jpeg = try await Self.makeJPEG(from: frames, mode: mode)   // heavy work, off the main actor
@@ -48,6 +48,8 @@ final class StackCaptureCoordinator: ObservableObject {
     }
 
     /// CPU-heavy develop → align → stack → encode, run off the MainActor to keep the UI responsive.
+    /// NOTE: long-exposure looks stack ~30 frames; on-device this is the slow path until Metal
+    /// acceleration + a capture/processing progress UI land (both deferred per the roadmap §19).
     nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
             let result = Pipeline.reduce(frames, mode: mode)

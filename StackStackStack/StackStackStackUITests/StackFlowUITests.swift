@@ -50,4 +50,25 @@ final class StackFlowUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+
+    func testLightTrailsLookProducesAResult() throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Relies on the Simulator fake-capture path.")
+        #endif
+        let app = XCUIApplication()
+        app.launch()
+        let trails = app.buttons["look-lightTrails"]
+        XCTAssertTrue(trails.waitForExistence(timeout: 10), "Trails look chip not found")
+        trails.tap()
+        let shutter = app.buttons["shutter"]
+        XCTAssertTrue(shutter.waitForExistence(timeout: 5))
+        shutter.tap()
+        XCTAssertTrue(app.staticTexts["Done"].waitForExistence(timeout: 90), "light-trails stack did not complete")
+
+        let shot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: shot)
+        attachment.name = "trails-result"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
 }
