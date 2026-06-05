@@ -45,7 +45,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         try await ensureAuthorized()
         try await ensureConfigured()
         guard !output.availableRawPhotoPixelFormatTypes.isEmpty else { throw CaptureError.noRawFormat }
-        try lockExposureAndFocus()
+        try lockExposureAndFocus(recipe: recipe)
 
         let frameCount = recipe.frameCount
         // Spread the captures across the recipe's window so long-exposure looks sample motion over
@@ -108,13 +108,38 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
     }
 
-    private func lockExposureAndFocus() throws {
+    /// Lock exposure/focus/WB for a stable burst. Honour any manual Pro overrides on the recipe;
+    /// otherwise lock to the metered auto values. Manual values are clamped to the device's range.
+    private func lockExposureAndFocus(recipe: CaptureRecipe) throws {
         guard let dev = device else { throw CaptureError.noDevice }
         try dev.lockForConfiguration()
-        if dev.isExposureModeSupported(.locked) { dev.exposureMode = .locked }
-        if dev.isFocusModeSupported(.locked) { dev.focusMode = .locked }
+        defer { dev.unlockForConfiguration() }
+
+        // Manual exposure (ISO and/or shutter) → custom exposure; else lock the auto value.
+        if recipe.manualISO != nil || recipe.manualShutterSeconds != nil {
+            let fmt = dev.activeFormat
+            let duration: CMTime = recipe.manualShutterSeconds
+                .map { CMTime(seconds: $0, preferredTimescale: 1_000_000) }
+                .map { min(max($0, fmt.minExposureDuration), fmt.maxExposureDuration) }
+                ?? AVCaptureDevice.currentExposureDuration
+            let iso: Float = recipe.manualISO
+                .map { min(max($0, fmt.minISO), fmt.maxISO) }
+                ?? AVCaptureDevice.currentISO
+            if dev.isExposureModeSupported(.custom) {
+                dev.setExposureModeCustom(duration: duration, iso: iso, completionHandler: nil)
+            }
+        } else if dev.isExposureModeSupported(.locked) {
+            dev.exposureMode = .locked
+        }
+
+        // Manual focus → locked lens position; else lock focus.
+        if let focus = recipe.manualFocus, dev.isLockingFocusWithCustomLensPositionSupported {
+            dev.setFocusModeLocked(lensPosition: min(max(focus, 0), 1), completionHandler: nil)
+        } else if dev.isFocusModeSupported(.locked) {
+            dev.focusMode = .locked
+        }
+
         if dev.isWhiteBalanceModeSupported(.locked) { dev.whiteBalanceMode = .locked }
-        dev.unlockForConfiguration()
     }
 
     // MARK: - Completion (always on stateQueue)

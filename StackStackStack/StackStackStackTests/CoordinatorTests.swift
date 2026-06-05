@@ -25,6 +25,16 @@ final class CoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testProFrameCountOverrideChangesCapturedFrames() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = LibraryStore(rootDirectory: dir)
+        let coord = StackCaptureCoordinator(capture: FakeCaptureService(width: 16, height: 16), store: store)
+        coord.pro = ProControls(frameCount: 5)      // override the look default (Detail = 8)
+        await coord.shoot()
+        XCTAssertEqual(try store.loadAll().first?.frameCount, 5)
+    }
+
+    @MainActor
     func testConcurrentShootsAreRejected() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = LibraryStore(rootDirectory: dir)
