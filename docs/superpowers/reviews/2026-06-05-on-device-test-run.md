@@ -42,6 +42,22 @@ All capture requests in the burst bail with `-12773` (24 bails captured across t
 - **Gallery thumbnails are not interactive** (T5) — no tap-to-open / re-edit / share of past stacks. Functional gap vs. expectation, not a crash.
 - **App is not orientation-locked** — runs in landscape. For a camera/stacking app, portrait is usually primary; landscape layouts (esp. editor) need attention if landscape is to be supported.
 
+## Resolution (branch `fix/sequential-burst-capture`)
+
+The headline bug and the follow-up performance concern were fixed and re-verified on device.
+
+**1. Sequential burst (commit `4749dfc`)** — issue the next `capturePhoto` only after the previous frame's `didFinishCaptureFor`, bounding in-flight RAW requests to one. Re-test: **Detail → Night captured in one session, both reached Done, 0 `-12773` bails** (no wedge).
+
+**2. Fast capture + parallel stacking (commit `b3e91e8`)** — after the user noted the arms-up step must be fast (post-processing can run long):
+- The 12 MP RAW→mosaic copy now runs on a dedicated processing queue, off the capture path (it previously ran in the photo delegate callback and blocked advancing).
+- Frames fire **back-to-back** (pacing removed) with `.speed` photo-quality priority.
+- Per-frame develop/luma/align/downscale parallelized across cores (`parallelMap`, result-identical — 89 engine tests pass).
+- Re-test: **Detail capture ~1–2 s** (8 frames within ~1 s, 0 bails); stacking runs parallel in the background.
+
+**3. Watchdog review fix (commit `…`)** — on a stalled frame the watchdog stops requesting new frames but waits for outstanding off-queue conversions before resuming, so it can't drop a still-converting frame.
+
+Code review: extra-high-effort pass on each commit; the one confirmed finding (watchdog dropping in-flight conversions) was fixed. Remaining review candidates refuted (`concurrentPerform` is a barrier; engine is pure; `outstanding` can't go negative; `.speed` doesn't change the fixed RAW format; back-to-back at the measured ~5 fps gives long-exposure looks a *longer* window than the old nominal duration). Still-open follow-ups: the shutter is disabled during the (now-background) stack, and the status copy could tell the user they can lower the phone once capture completes.
+
 ## What worked well
 
 - Live viewfinder (PR #23) — real-time feed, no black screen.
