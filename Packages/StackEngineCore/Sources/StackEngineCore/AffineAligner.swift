@@ -23,8 +23,11 @@ public enum AffineAligner {
     /// SSD. COARSE-TO-FINE over a Gaussian luma pyramid: the coarsest level is smooth (no aliasing →
     /// a global basin), then each finer level refines. scale/rotation are resolution-invariant;
     /// translation doubles per finer level. Robust on real high-frequency frames.
+    /// `robustClip` (when set) caps each pixel's squared luma residual, so a region that moves
+    /// differently from the global motion — a person/video in a handheld scene — can't pull the
+    /// estimate off the static background it should lock onto. nil = plain SSD (the DoF path).
     public static func estimate(reference ref: PixelImage, moving mov: PixelImage,
-                                translationSearch: Int = 8) -> Transform2D {
+                                translationSearch: Int = 8, robustClip: Float? = nil) -> Transform2D {
         precondition(ref.width == mov.width && ref.height == mov.height)
         let refPyr = ImagePyramid.gaussian(ref, minSize: 24)
         let movPyr = ImagePyramid.gaussian(mov, minSize: 24)
@@ -34,7 +37,8 @@ public enum AffineAligner {
             let rL = Luma.luminance(refPyr[lvl]), mL = Luma.luminance(movPyr[lvl])
             let lw = refPyr[lvl].width, lh = refPyr[lvl].height
             (s, r, tx, ty) = refine(rL, mL, width: lw, height: lh, s: s, r: r, tx: tx, ty: ty,
-                                    translationInit: lvl == levels - 1 ? translationSearch : 0)
+                                    translationInit: lvl == levels - 1 ? translationSearch : 0,
+                                    robustClip: robustClip)
             if lvl > 0 { tx *= 2; ty *= 2 }   // propagate translation to the next finer level
         }
         return .similarity(scale: s, rotation: r, tx: tx, ty: ty)
@@ -45,7 +49,7 @@ public enum AffineAligner {
     /// SSD search (only needed at the coarsest level). Scale is clamped to a sane range.
     private static func refine(_ refL: [Float], _ movL: [Float], width w: Int, height h: Int,
                                s s0: Float, r r0: Float, tx tx0: Float, ty ty0: Float,
-                               translationInit: Int) -> (Float, Float, Float, Float) {
+                               translationInit: Int, robustClip: Float?) -> (Float, Float, Float, Float) {
         var s = s0, r = r0, tx = tx0, ty = ty0
         if translationInit > 0 {
             let t0 = Alignment.estimateTranslation(referenceLuma: refL, movingLuma: movL,
@@ -54,7 +58,7 @@ public enum AffineAligner {
         }
         func cost(_ s: Float, _ r: Float, _ tx: Float, _ ty: Float) -> Float {
             ssdWarped(movL, refL, width: w, height: h,
-                      by: .similarity(scale: s, rotation: r, tx: tx, ty: ty))
+                      by: .similarity(scale: s, rotation: r, tx: tx, ty: ty), robustClip: robustClip)
         }
         var best = cost(s, r, tx, ty)
         var stepS: Float = 0.05, stepR: Float = 0.04, stepT: Float = 1.0
@@ -88,7 +92,7 @@ public enum AffineAligner {
 
     /// Mean SSD between `reference` luma and `moving` luma warped by `t` (centred, bilinear).
     private static func ssdWarped(_ movL: [Float], _ refL: [Float], width w: Int, height h: Int,
-                                  by t: Transform2D) -> Float {
+                                  by t: Transform2D, robustClip: Float?) -> Float {
         let cx = Float(w - 1) / 2, cy = Float(h - 1) / 2
         var sum: Float = 0
         for y in 0..<h {
@@ -96,7 +100,8 @@ public enum AffineAligner {
                 let p = t.apply(Float(x) - cx, Float(y) - cy)
                 let m = sampleLuma(movL, width: w, height: h, p.x + cx, p.y + cy)
                 let d = m - refL[y * w + x]
-                sum += d * d
+                let d2 = d * d
+                sum += robustClip.map { Swift.min(d2, $0) } ?? d2   // cap outliers (moving regions)
             }
         }
         return sum / Float(w * h)
