@@ -8,6 +8,7 @@ struct CaptureView: View {
     @State private var lastResult: UIImage?
     @State private var editSource: EditSource?
     @State private var showPro = false
+    @State private var previewLayer: CALayer?
 
     /// Everything the editor needs, loaded off the main thread before the sheet is presented.
     private struct EditSource: Identifiable {
@@ -20,6 +21,7 @@ struct CaptureView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            CameraPreviewView(previewLayer: previewLayer).ignoresSafeArea()   // live viewfinder (nil → black)
             VStack {
                 Spacer()
                 if let img = lastResult {
@@ -40,6 +42,8 @@ struct CaptureView: View {
                 shutterButton.padding(.bottom, 40)
             }
         }
+        // Start the live preview when the capture screen appears (no-op on the Simulator fake).
+        .task { if previewLayer == nil { previewLayer = await coordinator.startPreview() } }
         // Decode the finished JPEG once, from the coordinator's published result — no disk read.
         .onReceive(coordinator.$lastResultJPEG) { data in
             lastResult = data.flatMap { UIImage(data: $0) }

@@ -1,4 +1,5 @@
 import StackEngineCore
+import QuartzCore
 import simd
 
 /// Deterministic in-memory capture that SIMULATES scene motion across the burst, so the
@@ -8,6 +9,9 @@ import simd
 struct FakeCaptureService: CaptureService {
     let width: Int
     let height: Int
+
+    /// No live preview in the Simulator — the capture screen falls back to its neutral background.
+    func startPreview() async -> CALayer? { nil }
 
     func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
         let n = max(recipe.frameCount, 1)
