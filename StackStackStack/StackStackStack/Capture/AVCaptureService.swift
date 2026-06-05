@@ -33,15 +33,18 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
 
     private let stateQueue = DispatchQueue(label: "com.jdpneto.stackstackstack.capture.state")
     private let sessionQueue = DispatchQueue(label: "com.jdpneto.stackstackstack.capture.session")
+    // Off the capture path: the per-frame RAW→mosaic copy (12 MP) must NOT run in the AVFoundation
+    // delegate callback, or it blocks advancing to the next frame. Hand the photo here instead.
+    private let processingQueue = DispatchQueue(label: "com.jdpneto.stackstackstack.capture.processing")
 
     // Touched only on stateQueue.
     private var pending: [RawSensorFrame] = []
     private var remaining = 0                   // frames still to capture, including the in-flight one
+    private var outstanding = 0                 // RAW→frame conversions still running off the capture path
     private var continuation: CheckedContinuation<[RawSensorFrame], Error>?
     private var generation = 0                  // bumps per burst; stale captures/timeouts are ignored
     private var currentID: Int64?               // settings.uniqueID of the in-flight capture (nil between frames)
     private var rawType: OSType = 0             // Bayer RAW format used to build each frame's settings
-    private var pacingInterval = 0.0            // minimum delay between consecutive frame starts
     private var perFrameTimeout = 0.0           // watchdog horizon for a single capture
     // Touched only on sessionQueue.
     private var configured = false
@@ -52,12 +55,8 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         try await lockExposureAndFocus(recipe: recipe)   // waits for manual exposure/focus to settle
 
         let frameCount = recipe.frameCount
-        // Minimum start-to-start spacing so long-exposure looks sample motion over time. With the
-        // SEQUENTIAL burst below, the real spacing is at least one capture's own duration, so this
-        // is only a floor (small for the fast looks; the frame count drives the long-exposure span).
-        let interval = recipe.durationSeconds / Double(max(frameCount - 1, 1))
         // Per-frame watchdog: if a single capture never reports completion (interruption, thermal,
-        // drop) we give up on THAT frame and advance, instead of hanging the whole burst.
+        // drop) we end the burst with the frames gathered so far, instead of hanging.
         let frameTimeout = max(recipe.manualShutterSeconds ?? 0, 1.0) * 3 + 4.0
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[RawSensorFrame], Error>) in
@@ -74,11 +73,11 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
 
                 self.generation += 1
                 self.pending = []
+                self.outstanding = 0
                 self.continuation = cont
                 self.remaining = frameCount
                 self.currentID = nil
                 self.rawType = rawType
-                self.pacingInterval = interval
                 self.perFrameTimeout = frameTimeout
                 self.startNextFrameLocked(gen: self.generation)
             }
@@ -91,9 +90,10 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     /// must fully complete (`didFinishCaptureFor`) before the next one is requested.
     private func startNextFrameLocked(gen: Int) {
         guard self.generation == gen, self.continuation != nil else { return }
-        guard self.remaining > 0 else { self.finishLocked(); return }
+        guard self.remaining > 0 else { self.maybeFinishLocked(); return }
 
         let settings = AVCapturePhotoSettings(rawPixelFormatType: self.rawType)
+        settings.photoQualityPrioritization = .speed   // minimize per-frame capture latency
         let id = settings.uniqueID
         self.currentID = id
 
@@ -109,22 +109,38 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
 
         self.stateQueue.asyncAfter(deadline: .now() + self.perFrameTimeout) {
-            self.advanceLocked(completedID: id)   // no-op if the frame already completed
+            self.timeoutFrameLocked(stuckID: id)   // no-op if the frame already completed
         }
     }
 
-    /// Mark the in-flight capture `completedID` finished, then pace the next frame or end the burst.
-    /// Idempotent per frame: the real callback and the watchdog both call this, but only the first
-    /// (while `currentID == completedID`) takes effect. Must run on `stateQueue`.
+    /// Watchdog: a capture that hasn't reported back within `perFrameTimeout` is treated as a stall.
+    /// END the burst with the frames gathered so far — do NOT advance, because firing the next
+    /// capture while a stalled (but maybe still-in-flight) request lingers would re-create the very
+    /// overlap (FigCapture -12773) this sequential design exists to avoid. Must run on `stateQueue`.
+    private func timeoutFrameLocked(stuckID: Int64) {
+        guard self.continuation != nil, self.currentID == stuckID else { return }   // already advanced
+        self.finishLocked()
+    }
+
+    /// Mark the in-flight capture `completedID` finished, then immediately request the next frame
+    /// (back-to-back — the arms-up capture step must be as fast as the pipeline allows; the previous
+    /// request is fully done by `didFinishCaptureFor`, so there's no overlap). Idempotent per frame:
+    /// the real callback and the watchdog both call this, but only the first (while
+    /// `currentID == completedID`) takes effect. Must run on `stateQueue`.
     private func advanceLocked(completedID: Int64) {
         guard self.continuation != nil, self.currentID == completedID else { return }
         self.currentID = nil
         self.remaining -= 1
-        guard self.remaining > 0 else { self.finishLocked(); return }
-        let gen = self.generation
-        self.stateQueue.asyncAfter(deadline: .now() + self.pacingInterval) {
-            self.startNextFrameLocked(gen: gen)
-        }
+        guard self.remaining > 0 else { self.maybeFinishLocked(); return }
+        self.startNextFrameLocked(gen: self.generation)
+    }
+
+    /// Resume the continuation once every capture has been requested AND every off-queue conversion
+    /// has finished — otherwise the last frame(s) could be dropped while still converting. Must run
+    /// on `stateQueue`.
+    private func maybeFinishLocked() {
+        guard self.continuation != nil, self.remaining <= 0, self.outstanding == 0 else { return }
+        self.finishLocked()
     }
 
     /// Start the camera (authorize → configure → run) and return a preview layer bound to the
@@ -170,7 +186,9 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     // ProRAW (the 48 MP quad-Bayer path) — 4× less data, better low-light stacking,
                     // and the size the CPU develop+stack pipeline can actually handle. ProRAW off.
                     if self.output.isAppleProRAWSupported { self.output.isAppleProRAWEnabled = false }
-                    self.output.maxPhotoQualityPrioritization = .balanced   // lower per-frame burst latency
+                    // We develop the RAW ourselves, so the system's quality processing is wasted work —
+                    // prioritize speed to minimize per-frame latency (the arms-up capture must be fast).
+                    self.output.maxPhotoQualityPrioritization = .speed
                     self.session.commitConfiguration()
                     self.session.startRunning()  // off the main thread (sessionQueue)
                     self.device = dev
@@ -252,13 +270,23 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
 extension AVCaptureService: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput,
                      didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        // Convert outside the state queue (touches no shared state), then collect it for the burst.
-        // Advancing to the next frame happens in `didFinishCaptureFor` (the capture's final callback).
-        let frame = error == nil ? RawFrameConverter.make(from: photo) : nil
+        // Do NOT convert here — `RawFrameConverter.make` copies a 12 MP buffer, and this callback runs
+        // BEFORE `didFinishCaptureFor`, so converting inline would stall the next frame. Hand the photo
+        // to the processing queue and let capture advance immediately; collect the frame when it's ready.
         let id = photo.resolvedSettings.uniqueID
         stateQueue.async {
             guard self.continuation != nil, id == self.currentID else { return }   // stale/superseded
-            if let frame { self.pending.append(frame) }
+            let gen = self.generation
+            self.outstanding += 1
+            self.processingQueue.async {
+                let frame = error == nil ? RawFrameConverter.make(from: photo) : nil
+                self.stateQueue.async {
+                    guard self.continuation != nil, self.generation == gen else { return }   // burst ended/superseded
+                    if let frame { self.pending.append(frame) }
+                    self.outstanding -= 1
+                    self.maybeFinishLocked()
+                }
+            }
         }
     }
 

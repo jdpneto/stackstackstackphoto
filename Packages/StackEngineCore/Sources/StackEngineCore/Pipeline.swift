@@ -8,18 +8,16 @@ public enum Pipeline {
         if imgs.count == 1 { return imgs }
         let w = imgs[0].width, h = imgs[0].height
         precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
-        let lumas = imgs.map { Luma.luminance($0) }
+        // Luma per frame and the per-frame alignment are independent → run them across cores.
+        let lumas = parallelMap(imgs) { Luma.luminance($0) }
         let refIdx = ReferenceSelection.sharpestIndex(lumas: lumas, width: w, height: h)
-        var aligned = [PixelImage]()
-        aligned.reserveCapacity(imgs.count)
-        for (i, im) in imgs.enumerated() {
-            if i == refIdx { aligned.append(im); continue }
+        return parallelMap(Array(imgs.indices)) { i -> PixelImage in
+            if i == refIdx { return imgs[i] }
             // Coarse-to-fine on a luma pyramid: O(image) instead of O(image × searchRange²).
             let t = Alignment.estimateTranslationCoarseToFine(referenceLuma: lumas[refIdx], movingLuma: lumas[i],
                                                               width: w, height: h, maxShift: searchRange)
-            aligned.append(Alignment.warp(im, by: t))
+            return Alignment.warp(imgs[i], by: t)
         }
-        return aligned
     }
 
     /// Align then apply the look's reducer. `workingResolution` (long-edge px, nil = full) downscales
@@ -41,7 +39,8 @@ public enum Pipeline {
     /// full bilinear demosaic is the dominant develop cost otherwise.
     public static func reduce(_ frames: [RawSensorFrame], mode: StackMode, searchRange: Int = 8,
                               workingResolution: Int? = nil, binnedDevelop: Bool = false) -> PixelImage {
-        let developed = frames.map { binnedDevelop ? ColorPipeline.processBinned($0) : ColorPipeline.process($0) }
+        // Develop is the dominant cost (a full demosaic per frame) and each frame is independent.
+        let developed = parallelMap(frames) { binnedDevelop ? ColorPipeline.processBinned($0) : ColorPipeline.process($0) }
         return reduceImages(developed, mode: mode, searchRange: searchRange, workingResolution: workingResolution)
     }
 
@@ -49,7 +48,7 @@ public enum Pipeline {
     /// Frames start equal-size and reduce deterministically, so they stay equal-size.
     private static func downscale(_ imgs: [PixelImage], maxEdge: Int?) -> [PixelImage] {
         guard let maxEdge, maxEdge >= 1 else { return imgs }   // <1 would loop forever (reduce floors at 1)
-        return imgs.map { img in
+        return parallelMap(imgs) { img in
             var out = img
             while max(out.width, out.height) > maxEdge { out = ImagePyramid.reduce(out) }
             return out
