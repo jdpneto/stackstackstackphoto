@@ -14,15 +14,20 @@ struct EditorView: View {
     @State private var adj: ImageAdjustments
     @State private var preview: UIImage?
     @State private var renderTask: Task<Void, Never>?
+    @State private var generation = 0
     @State private var isSaving = false
     @State private var saveError = false
 
-    init(originalJPEG: Data, recordId: UUID, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
+    /// Adjustments + an initial downscaled preview are loaded OFF the main thread by the presenter
+    /// and passed in, so the editor's init/body do no synchronous disk reads or full-res decodes.
+    init(originalJPEG: Data, initialAdjustments: ImageAdjustments, initialPreview: UIImage?,
+         recordId: UUID, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
         self.originalJPEG = originalJPEG
         self.recordId = recordId
         self.store = store
         self.onSaved = onSaved
-        _adj = State(initialValue: store.adjustments(for: recordId))
+        _adj = State(initialValue: initialAdjustments)
+        _preview = State(initialValue: initialPreview)
     }
 
     var body: some View {
@@ -30,7 +35,7 @@ struct EditorView: View {
             VStack {
                 Group {
                     if let preview { Image(uiImage: preview).resizable().scaledToFit() }
-                    else if let ui = UIImage(data: originalJPEG) { Image(uiImage: ui).resizable().scaledToFit() }
+                    else { Color.black }   // brief placeholder; the initial preview is supplied off-main
                 }
                 .padding()
                 Spacer()
@@ -56,6 +61,7 @@ struct EditorView: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(isSaving) }
             }
             .onAppear { schedulePreview() }
+            .onDisappear { renderTask?.cancel() }   // don't keep rendering after the sheet closes
             .alert("Couldn't save the edit", isPresented: $saveError) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -75,12 +81,15 @@ struct EditorView: View {
     /// Render a downscaled preview off the main thread, cancelling any in-flight render.
     private func schedulePreview() {
         renderTask?.cancel()
+        generation += 1
+        let gen = generation
         let current = adj, jpeg = originalJPEG
         renderTask = Task {
             let data = await Task.detached(priority: .userInitiated) {
                 ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200)
             }.value
-            if Task.isCancelled { return }
+            // Drop a stale render: a newer schedulePreview (higher generation) or a cancel supersedes it.
+            if Task.isCancelled || gen != generation { return }
             preview = data.flatMap { UIImage(data: $0) }
         }
     }

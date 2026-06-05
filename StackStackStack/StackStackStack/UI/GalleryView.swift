@@ -18,7 +18,11 @@ struct GalleryView: View {
             }.padding(4)
         }
         .navigationTitle("Stacks")
-        .onAppear { records = (try? store.loadAll()) ?? [] }
+        // Load the index off the main thread (re-runs when the tab re-appears, picking up edits).
+        .task {
+            let lib = store
+            records = await Task.detached(priority: .userInitiated) { (try? lib.loadAll()) ?? [] }.value
+        }
     }
 }
 
