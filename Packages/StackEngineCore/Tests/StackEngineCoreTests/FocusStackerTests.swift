@@ -42,6 +42,12 @@ final class FocusStackerTests: XCTestCase {
         XCTAssertEqual(FocusStacker.allInFocus([img], config: DepthConfig(workingResolution: nil, maxFrames: 12))?.width, 8)
     }
 
+    func testMismatchedFrameSizesReturnNil() {
+        let a = PixelImage(width: 16, height: 16, fill: SIMD3<Float>(0.5, 0.5, 0.5))
+        let b = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(0.5, 0.5, 0.5))
+        XCTAssertNil(FocusStacker.allInFocus([a, b], config: DepthConfig(workingResolution: nil, maxFrames: 12)))
+    }
+
     func testWorkingResolutionDownscales() {
         let img = PixelImage(width: 64, height: 64, fill: SIMD3<Float>(0.5, 0.5, 0.5))
         let out = try! XCTUnwrap(FocusStacker.allInFocus([img, img], config: DepthConfig(workingResolution: 20, maxFrames: 12)))

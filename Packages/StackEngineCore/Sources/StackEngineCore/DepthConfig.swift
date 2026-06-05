@@ -12,6 +12,7 @@ public struct DepthConfig: Sendable, Equatable {
 
     public init(workingResolution: Int?, maxFrames: Int, alignFrames: Bool = false) {
         precondition(maxFrames > 0, "maxFrames must be > 0")
+        precondition(workingResolution == nil || workingResolution! >= 1, "workingResolution must be >= 1 or nil")
         self.workingResolution = workingResolution
         self.maxFrames = maxFrames
         self.alignFrames = alignFrames

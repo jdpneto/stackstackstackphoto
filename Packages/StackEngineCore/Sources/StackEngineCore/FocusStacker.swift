@@ -15,6 +15,8 @@ public enum FocusStacker {
         guard !images.isEmpty else { return nil }
         let frames = images.prefix(config.maxFrames).map { downscale($0, maxEdge: config.workingResolution) }
         guard frames.count >= 2 else { return frames.first }
+        // All brackets must share dimensions for sharpness/selection/blend; reject (nil) rather than trap.
+        guard frames.allSatisfy({ $0.width == frames[0].width && $0.height == frames[0].height }) else { return nil }
 
         let refIdx = ReferenceSelection.sharpestIndex(frames)
         let reference = frames[refIdx]
