@@ -4,7 +4,7 @@ import simd
 public enum Metrics {
     /// Max absolute per-channel difference between two linear images.
     public static func maxAbsDiff(_ a: PixelImage, _ b: PixelImage) -> Float {
-        precondition(a.pixels.count == b.pixels.count)
+        precondition(a.width == b.width && a.height == b.height, "image geometry mismatch")
         var m: Float = 0
         for i in 0..<a.pixels.count {
             let d = a.pixels[i] - b.pixels[i]

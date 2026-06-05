@@ -34,6 +34,20 @@ final class OutputTransformTests: XCTestCase {
         // linear 0.5 -> sRGB ~0.7353 -> ~188
         XCTAssertEqual(Int(bytes[8]), 188, accuracy: 1)
     }
+
+    func testEncodeIsNaNAndInfSafe() {
+        // A non-finite pixel (e.g. from degenerate upstream math) must not trap UInt8(NaN); it
+        // encodes to 0 (NaN) / 255 (+Inf) / 0 (-Inf) instead of crashing the export.
+        let img = PixelImage(width: 3, height: 1, pixels: [
+            SIMD3<Float>(.nan, .nan, .nan),
+            SIMD3<Float>(.infinity, .infinity, .infinity),
+            SIMD3<Float>(-.infinity, -.infinity, -.infinity),
+        ])
+        let bytes = OutputTransform.encodeSRGB8(img)
+        XCTAssertEqual(bytes[0], 0)     // NaN → 0
+        XCTAssertEqual(bytes[4], 255)   // +Inf → clamped to 1 → 255
+        XCTAssertEqual(bytes[8], 0)     // -Inf → clamped to 0 → 0
+    }
 }
 
 private func XCTAssertEqual(_ a: Int, _ b: Int, accuracy: Int,

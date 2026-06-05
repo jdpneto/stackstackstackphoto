@@ -65,8 +65,10 @@ public enum ImageEditor {
         guard let ratio = aspect.ratio else { return img }
         let w = img.width, h = img.height
         var cw = w, ch = h
-        if Float(w) / Float(h) > ratio { cw = max(1, Int(Float(h) * ratio)) }
-        else { ch = max(1, Int(Float(w) / ratio)) }
+        // Clamp to [1, source extent]: max(1,…) bars a zero size, min(w/h,…) bars a Float-rounding
+        // overshoot that would push the read window out of bounds.
+        if Float(w) / Float(h) > ratio { cw = min(w, max(1, Int(Float(h) * ratio))) }
+        else { ch = min(h, max(1, Int(Float(w) / ratio))) }
         let x0 = (w - cw) / 2, y0 = (h - ch) / 2
         var out = PixelImage(width: cw, height: ch)
         for y in 0..<ch {
