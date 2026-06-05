@@ -6,8 +6,16 @@ import StackEngineCore
 struct CaptureView: View {
     @ObservedObject var coordinator: StackCaptureCoordinator
     @State private var lastResult: UIImage?
-    @State private var showEditor = false
+    @State private var editSource: EditSource?
     @State private var showPro = false
+
+    /// Everything the editor needs, loaded off the main thread before the sheet is presented.
+    private struct EditSource: Identifiable {
+        let id: UUID
+        let original: Data
+        let adjustments: ImageAdjustments
+        let preview: UIImage?
+    }
 
     var body: some View {
         ZStack {
@@ -18,7 +26,7 @@ struct CaptureView: View {
                     VStack {
                         Image(uiImage: img).resizable().scaledToFit()
                         if coordinator.lastSavedID != nil {
-                            Button("Edit") { showEditor = true }
+                            Button("Edit") { openEditor() }
                                 .buttonStyle(.bordered).tint(.white)
                         }
                     }.padding()
@@ -36,17 +44,29 @@ struct CaptureView: View {
         .onReceive(coordinator.$lastResultJPEG) { data in
             lastResult = data.flatMap { UIImage(data: $0) }
         }
-        .sheet(isPresented: $showEditor) {
-            if let id = coordinator.lastSavedID, let original = coordinator.library.originalData(for: id) {
-                EditorView(originalJPEG: original, recordId: id, store: coordinator.library) { renderedJPEG in
-                    lastResult = UIImage(data: renderedJPEG)   // reflect the edit directly — no disk read
-                }
-            } else {
-                VStack(spacing: 16) {
-                    Text("Couldn't open the editor.").font(.headline)
-                    Button("Close") { showEditor = false }
-                }.padding()
+        .sheet(item: $editSource) { src in
+            EditorView(originalJPEG: src.original, initialAdjustments: src.adjustments,
+                       initialPreview: src.preview, recordId: src.id, store: coordinator.library) { renderedJPEG in
+                lastResult = UIImage(data: renderedJPEG)   // reflect the edit directly — no disk read
             }
+        }
+    }
+
+    /// Load the original JPEG, persisted adjustments, and a downscaled preview OFF the main thread,
+    /// then present the editor — so tapping Edit never blocks the UI on a full-res disk read/decode.
+    private func openEditor() {
+        guard let id = coordinator.lastSavedID else { return }
+        let lib = coordinator.library
+        Task {
+            let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, ImageAdjustments, Data?)? in
+                guard let data = lib.originalData(for: id) else { return nil }
+                let adj = lib.adjustments(for: id)
+                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200)
+                return (data, adj, prev)
+            }.value
+            guard let (data, adj, prevData) = loaded else { return }
+            editSource = EditSource(id: id, original: data, adjustments: adj,
+                                    preview: prevData.flatMap { UIImage(data: $0) })
         }
     }
 

@@ -4,7 +4,13 @@ import StackEngineCore
 /// Minimal file-backed library: JPEG results + a JSON index in the given root. All writes are
 /// atomic (temp-file + rename) and data-protected, and `loadAll` self-heals (drops records whose
 /// file vanished) and preserves a corrupt index rather than letting the next save overwrite it.
-final class LibraryStore {
+///
+/// `@unchecked Sendable`: no mutable in-memory state — all stored properties are immutable and every
+/// method is stateless file I/O. Reads (loadAll/originalData/adjustments) are safe to call off the
+/// main thread. WRITES (save/applyEdit/delete) must stay MainActor-confined: they are read-modify-
+/// write on index.json, so two concurrent writers could lose a record (Sendable guarantees memory
+/// safety of the reference, not mutation atomicity).
+final class LibraryStore: @unchecked Sendable {
     private let root: URL
     private let indexURL: URL
     private let fm = FileManager.default
