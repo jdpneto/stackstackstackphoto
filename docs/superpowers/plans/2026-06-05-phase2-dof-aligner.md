@@ -9,6 +9,8 @@
 **Tech Stack:** Swift, `simd`. Pure-CPU engine, golden-tested via `swift test`. Spec: `docs/superpowers/specs/2026-06-05-phase2-depth-of-field-design.md` §3.1–3.2.
 
 > **Note on interpolation:** Phase 1 warps with **bilinear** (matching the existing `ImageEditor.straighten`), not the spec's bicubic — bicubic is a deferred precision upgrade. Phase 1 estimates **scale + rotation + translation** (similarity); the `Transform2D` type is a general 2×3 affine so later phases can extend it.
+>
+> **Required Phase-4 prerequisite (from code review):** the estimator is a **single-resolution** Hooke–Jeeves search validated on well-conditioned (smooth) fixtures. A **coarse-to-fine luma Gaussian pyramid is REQUIRED** — not merely a precision upgrade — before `estimate` runs on real high-frequency or full-sensor-resolution frames: without it the SSD surface is multimodal (local-minima risk on real brackets) and the full-res cost is minutes-scale per frame. Build the pyramid as the first step of the FocusStacker (Phase 4) integration. Phase 1 ships defensive guards (scale clamped to [0.5, 2.0], non-finite/runaway sample coordinates clamped, iteration backstop) so the foundation is crash-safe. Cross-file bilinear-sampler consolidation (`AffineAligner.sampleRGB`/`sampleLuma`, `ImageEditor.bilinear`) is a deferred cleanup.
 
 ---
 

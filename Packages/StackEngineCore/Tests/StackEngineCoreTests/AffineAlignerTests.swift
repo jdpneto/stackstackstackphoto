@@ -75,4 +75,16 @@ final class AffineAlignerTests: XCTestCase {
         for y in 10..<38 { for x in 10..<38 { m = max(m, abs(a[x, y].x - b[x, y].x)) } }
         return m
     }
+
+    func testEstimateKeepsScaleSaneAndFinite() {
+        // A 3× magnification's true inverse (~0.33) is below the clamp floor; the search must stop
+        // at the floor rather than walk to a degenerate/near-zero scale, and stay finite.
+        let ref = texture(40, 40)
+        let mov = AffineAligner.warp(ref, by: .similarity(scale: 3.0, rotation: 0, tx: 0, ty: 0))
+        let est = AffineAligner.estimate(reference: ref, moving: mov)
+        let scale = (est.a * est.a + est.c * est.c).squareRoot()
+        XCTAssertTrue(est.a.isFinite && est.c.isFinite && est.tx.isFinite && est.ty.isFinite)
+        XCTAssertGreaterThanOrEqual(scale, 0.5 - 1e-3)   // clamp floor held
+        XCTAssertLessThanOrEqual(scale, 2.0 + 1e-3)      // clamp ceiling held
+    }
 }

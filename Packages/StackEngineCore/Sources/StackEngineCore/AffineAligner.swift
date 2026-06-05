@@ -21,7 +21,14 @@ public enum AffineAligner {
 
     /// Estimate the similarity transform that best aligns `moving` to `reference`, minimising luma
     /// SSD. Coarse integer-translation init (reuses Alignment.estimateTranslation) then a
-    /// deterministic Hooke–Jeeves pattern search over scale / rotation / sub-pixel translation.
+    /// deterministic Hooke–Jeeves pattern search over scale / rotation / sub-pixel translation,
+    /// with scale clamped to a sane range.
+    ///
+    /// PHASE-1 FOUNDATION: single-resolution search, validated on well-conditioned (smooth) inputs.
+    /// A coarse-to-fine luma Gaussian pyramid is REQUIRED — not merely a precision upgrade — before
+    /// this runs on real high-frequency or full-sensor-resolution frames: the SSD surface is then
+    /// multimodal (local-minima risk) and the full-res cost is large. It is a prerequisite for the
+    /// FocusStacker integration (spec §3.2).
     public static func estimate(reference ref: PixelImage, moving mov: PixelImage,
                                 translationSearch: Int = 8) -> Transform2D {
         precondition(ref.width == mov.width && ref.height == mov.height)
@@ -40,8 +47,11 @@ public enum AffineAligner {
 
         var best = cost(s, r, tx, ty)
         var stepS: Float = 0.05, stepR: Float = 0.04, stepT: Float = 1.0
+        let minScale: Float = 0.5, maxScale: Float = 2.0   // bar a degenerate / mirror-flipped scale
         var guardCount = 0
-        while stepT > 0.01 && guardCount < 300 {
+        // The loop normally exits via stepT shrinking below the sub-pixel threshold; the iteration
+        // cap is only a safety backstop against a pathological never-converging cost surface.
+        while stepT > 0.01 && guardCount < 1000 {
             guardCount += 1
             var improved = false
             let trials: [(Float, Float, Float, Float)] = [
@@ -51,9 +61,11 @@ public enum AffineAligner {
                 (0, 0, 0,  stepT), (0, 0, 0, -stepT),
             ]
             for (dS, dR, dTx, dTy) in trials {
-                let c = cost(s + dS, r + dR, tx + dTx, ty + dTy)
+                let ns = s + dS
+                if ns < minScale || ns > maxScale { continue }   // never accept a degenerate scale
+                let c = cost(ns, r + dR, tx + dTx, ty + dTy)
                 if c < best - 1e-9 {
-                    best = c; s += dS; r += dR; tx += dTx; ty += dTy; improved = true
+                    best = c; s = ns; r += dR; tx += dTx; ty += dTy; improved = true
                 }
             }
             if !improved { stepS *= 0.5; stepR *= 0.5; stepT *= 0.5 }
@@ -85,8 +97,12 @@ public enum AffineAligner {
 
     // MARK: - Private samplers (bilinear, edge-clamped)
 
-    static func sampleRGB(_ img: PixelImage, _ fx: Float, _ fy: Float) -> SIMD3<Float> {
+    private static func sampleRGB(_ img: PixelImage, _ fxIn: Float, _ fyIn: Float) -> SIMD3<Float> {
         let w = img.width, h = img.height
+        // Clamp to a finite, near-bounds range so Int(floor(...)) can't overflow/trap on a
+        // non-finite or runaway coordinate; the ±1 border is handled by the edge clamp in `at`.
+        let fx = min(max(fxIn.isFinite ? fxIn : 0, -1), Float(w))
+        let fy = min(max(fyIn.isFinite ? fyIn : 0, -1), Float(h))
         let x0 = Int(floor(fx)), y0 = Int(floor(fy))
         let tx = fx - Float(x0), ty = fy - Float(y0)
         @inline(__always) func at(_ x: Int, _ y: Int) -> SIMD3<Float> {
@@ -97,7 +113,9 @@ public enum AffineAligner {
         return top + (bot - top) * ty
     }
 
-    static func sampleLuma(_ l: [Float], width w: Int, height h: Int, _ fx: Float, _ fy: Float) -> Float {
+    private static func sampleLuma(_ l: [Float], width w: Int, height h: Int, _ fxIn: Float, _ fyIn: Float) -> Float {
+        let fx = min(max(fxIn.isFinite ? fxIn : 0, -1), Float(w))
+        let fy = min(max(fyIn.isFinite ? fyIn : 0, -1), Float(h))
         let x0 = Int(floor(fx)), y0 = Int(floor(fy))
         let tx = fx - Float(x0), ty = fy - Float(y0)
         @inline(__always) func at(_ x: Int, _ y: Int) -> Float {
