@@ -61,7 +61,8 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Metal acceleration + a progress UI are roadmap items.
     nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
-            let result = Pipeline.reduce(frames, mode: mode, workingResolution: managedWorkingResolution)
+            let result = Pipeline.reduce(frames, mode: mode, workingResolution: managedWorkingResolution,
+                                         binnedDevelop: true)   // fast half-res develop for the managed path
             let rgba = OutputTransform.encodeSRGB8(result)
             return try ImageEncoder.encode(rgba8: rgba, width: result.width, height: result.height,
                                            format: .jpeg, quality: 0.95)

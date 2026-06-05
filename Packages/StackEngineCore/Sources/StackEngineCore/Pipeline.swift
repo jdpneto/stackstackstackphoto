@@ -37,10 +37,12 @@ public enum Pipeline {
     }
 
     /// End-to-end from raw frames: develop each → (downscale) → align → reduce for the chosen look.
+    /// `binnedDevelop` uses the fast half-resolution 2×2-bin develop (managed/on-device path); the
+    /// full bilinear demosaic is the dominant develop cost otherwise.
     public static func reduce(_ frames: [RawSensorFrame], mode: StackMode, searchRange: Int = 8,
-                              workingResolution: Int? = nil) -> PixelImage {
-        reduceImages(frames.map { ColorPipeline.process($0) }, mode: mode, searchRange: searchRange,
-                     workingResolution: workingResolution)
+                              workingResolution: Int? = nil, binnedDevelop: Bool = false) -> PixelImage {
+        let developed = frames.map { binnedDevelop ? ColorPipeline.processBinned($0) : ColorPipeline.process($0) }
+        return reduceImages(developed, mode: mode, searchRange: searchRange, workingResolution: workingResolution)
     }
 
     /// Halve (Gaussian reduce) each frame until its long edge is within `maxEdge` (nil = no downscale).

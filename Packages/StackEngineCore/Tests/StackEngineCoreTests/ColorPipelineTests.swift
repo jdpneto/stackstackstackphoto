@@ -83,4 +83,31 @@ final class ColorPipelineTests: XCTestCase {
         XCTAssertEqual(img2[2, 2].y, 0.25, accuracy: 1e-5)
         XCTAssertEqual(img2[2, 2].z, 0.1, accuracy: 1e-5)
     }
+
+    func testBinDemosaicCombines2x2Quad() {
+        // RGGB linearized mosaic: R=0.8, G=0.4, G=0.6, B=0.2 → one RGB pixel (0.8, mean(0.4,0.6)=0.5, 0.2).
+        let lin: [Float] = [0.8, 0.4, 0.6, 0.2]
+        let out = binDemosaic(lin, width: 2, height: 2, pattern: .rggb)
+        XCTAssertEqual(out.width, 1); XCTAssertEqual(out.height, 1)
+        XCTAssertEqual(out[0, 0].x, 0.8, accuracy: 1e-5)
+        XCTAssertEqual(out[0, 0].y, 0.5, accuracy: 1e-5)
+        XCTAssertEqual(out[0, 0].z, 0.2, accuracy: 1e-5)
+    }
+
+    func testBinDemosaicHandlesNonRGGBPattern() {
+        // BGGR: (0,0)=B, (1,0)=G, (0,1)=G, (1,1)=R → still resolves to R=0.8, G=0.5, B=0.2.
+        let out = binDemosaic([0.2, 0.4, 0.6, 0.8], width: 2, height: 2, pattern: .bggr)
+        XCTAssertEqual(out[0, 0].x, 0.8, accuracy: 1e-5)
+        XCTAssertEqual(out[0, 0].y, 0.5, accuracy: 1e-5)
+        XCTAssertEqual(out[0, 0].z, 0.2, accuracy: 1e-5)
+    }
+
+    func testProcessBinnedHalvesResolutionAndDevelops() {
+        let w = 8, h = 8
+        let frame = RawSensorFrame(width: w, height: h, mosaic: [UInt16](repeating: 600, count: w * h),
+                                   blackLevel: 64, whiteLevel: 1024, cfa: .rggb)
+        let out = ColorPipeline.processBinned(frame)
+        XCTAssertEqual(out.width, 4); XCTAssertEqual(out.height, 4)   // half resolution
+        XCTAssertTrue(out[2, 2].x.isFinite && out[2, 2].x > 0)
+    }
 }

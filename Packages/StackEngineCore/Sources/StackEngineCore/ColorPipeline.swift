@@ -57,14 +57,52 @@ func demosaic(_ lin: [Float], width w: Int, height h: Int, pattern: CFAPattern) 
     return out
 }
 
+/// Fast HALF-RESOLUTION develop: combine each 2×2 CFA quad (1 R, 2 G, 1 B) directly into one RGB
+/// pixel — no per-pixel neighbour interpolation. Far cheaper than bilinear demosaic (the dominant
+/// on-device develop cost) and, since the managed pipeline downscales anyway, loses nothing.
+func binDemosaic(_ lin: [Float], width w: Int, height h: Int, pattern: CFAPattern) -> PixelImage {
+    let ow = w / 2, oh = h / 2
+    var out = PixelImage(width: ow, height: oh)
+    for oy in 0..<oh {
+        let y0 = 2 * oy
+        for ox in 0..<ow {
+            let x0 = 2 * ox
+            var r: Float = 0, g: Float = 0, b: Float = 0, gn: Float = 0
+            for dy in 0..<2 {
+                for dx in 0..<2 {
+                    let v = lin[(y0 + dy) * w + (x0 + dx)]
+                    switch cfaColor(pattern, x0 + dx, y0 + dy) {
+                    case .red:   r = v
+                    case .green: g += v; gn += 1
+                    case .blue:  b = v
+                    }
+                }
+            }
+            out[ox, oy] = SIMD3<Float>(r, gn > 0 ? g / gn : g, b)
+        }
+    }
+    return out
+}
+
 public enum ColorPipeline {
     /// Develop a raw frame into a linear, working-space RGB image.
     /// Order (normative, design §12): linearize → white balance → demosaic → color matrix.
     public static func process(_ frame: RawSensorFrame) -> PixelImage {
-        let lin = linearizeAndBalance(frame)
-        var img = demosaic(lin, width: frame.width, height: frame.height, pattern: frame.cfa)
+        develop(frame, demosaiced: demosaic(linearizeAndBalance(frame),
+                                            width: frame.width, height: frame.height, pattern: frame.cfa))
+    }
+
+    /// Fast half-resolution develop (2×2 binning) — same pipeline, cheap demosaic. Used for the
+    /// managed on-device path (the full-res output is downscaled anyway).
+    public static func processBinned(_ frame: RawSensorFrame) -> PixelImage {
+        develop(frame, demosaiced: binDemosaic(linearizeAndBalance(frame),
+                                               width: frame.width, height: frame.height, pattern: frame.cfa))
+    }
+
+    private static func develop(_ frame: RawSensorFrame, demosaiced img: PixelImage) -> PixelImage {
+        var out = img
         let m = frame.colorMatrix
-        for i in 0..<img.pixels.count { img.pixels[i] = m * img.pixels[i] }
-        return img
+        for i in 0..<out.pixels.count { out.pixels[i] = m * out.pixels[i] }
+        return out
     }
 }
