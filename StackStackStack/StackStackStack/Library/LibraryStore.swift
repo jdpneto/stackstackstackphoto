@@ -6,7 +6,10 @@ import StackEngineCore
 /// file vanished) and preserves a corrupt index rather than letting the next save overwrite it.
 ///
 /// `@unchecked Sendable`: no mutable in-memory state — all stored properties are immutable and every
-/// method is stateless file I/O — so reads/writes are safe to call off the main thread.
+/// method is stateless file I/O. Reads (loadAll/originalData/adjustments) are safe to call off the
+/// main thread. WRITES (save/applyEdit/delete) must stay MainActor-confined: they are read-modify-
+/// write on index.json, so two concurrent writers could lose a record (Sendable guarantees memory
+/// safety of the reference, not mutation atomicity).
 final class LibraryStore: @unchecked Sendable {
     private let root: URL
     private let indexURL: URL
