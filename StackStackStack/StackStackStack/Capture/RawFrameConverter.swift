@@ -72,7 +72,12 @@ enum RawFrameConverter {
         }
 
         var white: Float = 16383  // 14-bit default
-        if let num = dng?[kCGImagePropertyDNGWhiteLevel as String] as? NSNumber { white = num.floatValue }
+        if let v = dng?[kCGImagePropertyDNGWhiteLevel as String] {
+            // Apple delivers WhiteLevel as an array (rarely a scalar); accept both, else the wrong
+            // denominator silently compresses every highlight.
+            if let arr = v as? [NSNumber], let first = arr.first { white = first.floatValue }
+            else if let num = v as? NSNumber { white = num.floatValue }
+        }
         if white <= black { white = black + 1 }  // never let the linearization denominator hit 0
         return (black, white)
     }

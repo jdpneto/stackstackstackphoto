@@ -62,10 +62,10 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 guard self.continuation == nil else { cont.resume(throwing: CaptureError.busy); return }
                 guard frameCount > 0 else { cont.resume(throwing: CaptureError.noFramesProduced); return }
                 let rawTypes = self.output.availableRawPhotoPixelFormatTypes
-                // Prefer a Bayer format the converter can read (a ProRAW-capable device may list a
-                // ProRAW format first, which our single-plane reader can't handle).
-                guard let rawType = rawTypes.first(where: { RawFrameConverter.isSupportedBayerFormat($0) })
-                        ?? rawTypes.first else {
+                // Require a Bayer format the single-plane reader can decode. NOT `?? rawTypes.first`:
+                // feeding a ProRAW/other format to AVCapturePhotoSettings(rawPixelFormatType:) can
+                // raise an uncatchable NSException, and the converter couldn't read it anyway.
+                guard let rawType = rawTypes.first(where: { RawFrameConverter.isSupportedBayerFormat($0) }) else {
                     cont.resume(throwing: CaptureError.noRawFormat); return
                 }
 
