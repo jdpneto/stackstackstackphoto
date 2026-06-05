@@ -20,7 +20,9 @@ enum ImageDecoder {
         }
         guard let image = cg else { return nil }
         let w = image.width, h = image.height
-        guard w > 0, h > 0 else { return nil }
+        // Bound dimensions so w*h*4 can't overflow Int or trigger an absurd allocation on a
+        // malformed/crafted source (30000² ≈ 0.9 GP, far beyond any real phone capture).
+        guard w > 0, h > 0, w <= 30_000, h <= 30_000 else { return nil }
         var bytes = [UInt8](repeating: 0, count: w * h * 4)
         // Explicit RGBX, big-endian byte order so byte 0 is R (matches OutputTransform's channel order)
         // and the format is fully specified for any source colour space.
