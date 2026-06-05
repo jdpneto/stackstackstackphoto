@@ -1,5 +1,6 @@
 import Foundation
 import Combine            // required for ObservableObject / @Published
+import QuartzCore         // CALayer for the preview
 import StackEngineCore
 
 /// Orchestrates one capture: burst → develop+align+stack → encode → save.
@@ -30,6 +31,9 @@ final class StackCaptureCoordinator: ObservableObject {
     var isBusy: Bool {
         switch state { case .capturing, .processing: return true; default: return false }
     }
+
+    /// Start the live preview and return its layer (nil if unavailable, e.g. the Simulator fake).
+    func startPreview() async -> CALayer? { await capture.startPreview() }
 
     func shoot() async {
         guard !isBusy else { return }   // reject a second shoot while one is already running

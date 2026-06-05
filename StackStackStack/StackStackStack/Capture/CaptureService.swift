@@ -1,4 +1,5 @@
 import StackEngineCore
+import QuartzCore
 
 /// How a burst is captured for a given look (design §10.4), plus optional manual Pro overrides.
 /// Long-exposure looks capture more frames over a longer window (a continuous burst); the static
@@ -45,4 +46,7 @@ struct CaptureRecipe: Sendable, Equatable {
 
 protocol CaptureService {
     func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame]
+    /// Start the live preview session and return a layer showing it (nil if unavailable, e.g. the
+    /// Simulator fake). Idempotent — safe to call each time the capture screen appears.
+    func startPreview() async -> CALayer?
 }

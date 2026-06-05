@@ -95,6 +95,20 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
     }
 
+    /// Start the camera (authorize → configure → run) and return a preview layer bound to the
+    /// session, so the capture screen shows a live viewfinder. Idempotent (config is cached).
+    func startPreview() async -> CALayer? {
+        do {
+            try await ensureAuthorized()
+            try await ensureConfigured()
+        } catch {
+            return nil   // no permission / no camera → no preview (the UI shows its neutral background)
+        }
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        return layer
+    }
+
     // MARK: - Authorization & lazy configuration
 
     private func ensureAuthorized() async throws {
