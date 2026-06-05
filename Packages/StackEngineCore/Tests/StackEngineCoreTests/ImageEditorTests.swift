@@ -55,4 +55,16 @@ final class ImageEditorTests: XCTestCase {
         XCTAssertEqual(out.pixels[0].y, 0.51, accuracy: 1e-4)   // (0.2*2*1.0 - 0.18)*1.5 + 0.18
         XCTAssertEqual(out.pixels[0].z, 0.33, accuracy: 1e-4)   // (0.2*2*0.7 - 0.18)*1.5 + 0.18
     }
+
+    func testDecodesOldAdjustmentsWithoutNewKeys() throws {
+        // An edits.json written before this change has only the four tonal keys.
+        let oldJSON = #"{"exposureEV":1,"contrast":0,"temperature":0,"tint":0}"#.data(using: .utf8)!
+        let adj = try JSONDecoder().decode(ImageAdjustments.self, from: oldJSON)
+        XCTAssertEqual(adj.exposureEV, 1, accuracy: 1e-6)
+        XCTAssertEqual(adj.shadows, 0)            // defaulted
+        XCTAssertEqual(adj.highlights, 0)         // defaulted
+        XCTAssertEqual(adj.straightenDegrees, 0)  // defaulted
+        XCTAssertEqual(adj.cropAspect, .original) // defaulted
+        XCTAssertFalse(ImageAdjustments(exposureEV: 1).isIdentity)
+    }
 }

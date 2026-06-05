@@ -1,17 +1,54 @@
-/// Non-destructive global tonal adjustments applied to a developed result (design §14).
-public struct ImageAdjustments: Sendable, Equatable, Codable {
-    public var exposureEV: Float    // stops; linear is multiplied by 2^EV
-    public var contrast: Float      // -1...1, around an 18% linear pivot
-    public var temperature: Float   // -1...1, warm (+) / cool (-)
-    public var tint: Float          // -1...1, magenta (+) / green (-)
+/// Center-crop aspect presets for the editor.
+public enum CropAspect: String, Sendable, Equatable, Codable, CaseIterable {
+    case original, square, fourThree, sixteenNine
+    /// width:height ratio, or nil for the original (no crop).
+    public var ratio: Float? {
+        switch self {
+        case .original:    return nil
+        case .square:      return 1
+        case .fourThree:   return 4.0 / 3.0
+        case .sixteenNine: return 16.0 / 9.0
+        }
+    }
+}
 
-    public init(exposureEV: Float = 0, contrast: Float = 0, temperature: Float = 0, tint: Float = 0) {
+/// Non-destructive global adjustments applied to a developed result (design §14).
+public struct ImageAdjustments: Sendable, Equatable, Codable {
+    public var exposureEV: Float        // stops; linear ×2^EV
+    public var contrast: Float          // -1...1 around an 18% linear pivot
+    public var temperature: Float       // -1...1, warm (+) / cool (-)
+    public var tint: Float              // -1...1, magenta (+) / green (-)
+    public var shadows: Float           // -1...1, lift (+) / lower (-) dark tones
+    public var highlights: Float        // -1...1, lift (+) / lower (-) bright tones
+    public var straightenDegrees: Float // rotation about the centre, degrees
+    public var cropAspect: CropAspect   // centre-crop aspect
+
+    public init(exposureEV: Float = 0, contrast: Float = 0, temperature: Float = 0, tint: Float = 0,
+                shadows: Float = 0, highlights: Float = 0, straightenDegrees: Float = 0,
+                cropAspect: CropAspect = .original) {
         self.exposureEV = exposureEV
         self.contrast = contrast
         self.temperature = temperature
         self.tint = tint
+        self.shadows = shadows
+        self.highlights = highlights
+        self.straightenDegrees = straightenDegrees
+        self.cropAspect = cropAspect
     }
 
     public static let identity = ImageAdjustments()
     public var isIdentity: Bool { self == .identity }
+
+    // Back-compat: edit sidecars written before the new fields lack those keys — default them.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        exposureEV = try c.decodeIfPresent(Float.self, forKey: .exposureEV) ?? 0
+        contrast = try c.decodeIfPresent(Float.self, forKey: .contrast) ?? 0
+        temperature = try c.decodeIfPresent(Float.self, forKey: .temperature) ?? 0
+        tint = try c.decodeIfPresent(Float.self, forKey: .tint) ?? 0
+        shadows = try c.decodeIfPresent(Float.self, forKey: .shadows) ?? 0
+        highlights = try c.decodeIfPresent(Float.self, forKey: .highlights) ?? 0
+        straightenDegrees = try c.decodeIfPresent(Float.self, forKey: .straightenDegrees) ?? 0
+        cropAspect = try c.decodeIfPresent(CropAspect.self, forKey: .cropAspect) ?? .original
+    }
 }
