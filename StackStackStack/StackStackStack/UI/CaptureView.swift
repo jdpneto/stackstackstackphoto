@@ -28,7 +28,8 @@ struct CaptureView: View {
             lastResult = data.flatMap { UIImage(data: $0) }
         }
         // Changing the look clears the stale result so the centre shows the newly selected look.
-        .onChange(of: coordinator.mode) { _ in lastResult = nil }
+        // (onReceive + removeDuplicates is warning-free on the iOS 16 target, unlike onChange(of:perform:).)
+        .onReceive(coordinator.$mode.removeDuplicates()) { _ in lastResult = nil }
     }
 
     private var statusLabel: some View {
