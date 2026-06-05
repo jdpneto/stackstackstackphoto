@@ -42,12 +42,14 @@ struct EditorView: View {
             .navigationTitle("Edit")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(isSaving) }
                 ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(isSaving) }
             }
             .onAppear { schedulePreview() }
             .alert("Couldn't save the edit", isPresented: $saveError) {
                 Button("OK", role: .cancel) {}
+            } message: {
+                Text("The image couldn't be processed. Please try again.")
             }
         }
     }

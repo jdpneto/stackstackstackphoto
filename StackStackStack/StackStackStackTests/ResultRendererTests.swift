@@ -19,4 +19,14 @@ final class ResultRendererTests: XCTestCase {
         let (brRGBA, _, _) = try XCTUnwrap(ImageDecoder.rgba8(from: brighter))
         XCTAssertGreaterThan(Int(brRGBA[0]), Int(idRGBA[0]))   // pixel got brighter
     }
+
+    func testRenderWithMaxPixelDownscales() throws {
+        let big = PixelImage(width: 64, height: 64, fill: SIMD3<Float>(0.5, 0.5, 0.5))
+        let jpeg = try ImageEncoder.encode(rgba8: OutputTransform.encodeSRGB8(big),
+                                           width: 64, height: 64, format: .jpeg, quality: 1.0)
+        let preview = try XCTUnwrap(ResultRenderer.render(originalJPEG: jpeg, adjustments: .identity, maxPixel: 16))
+        let (_, w, h) = try XCTUnwrap(ImageDecoder.rgba8(from: preview))
+        XCTAssertLessThanOrEqual(max(w, h), 16)   // preview path downscaled to <= maxPixel
+        XCTAssertGreaterThan(w, 0)
+    }
 }
