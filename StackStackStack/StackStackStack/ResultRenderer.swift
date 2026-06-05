@@ -10,6 +10,8 @@ enum ResultRenderer {
         let linear = OutputTransform.decodeSRGB8(rgba, width: w, height: h)
         let adjusted = ImageEditor.apply(adjustments, to: linear)
         let outRGBA = OutputTransform.encodeSRGB8(adjusted)
-        return try? ImageEncoder.encode(rgba8: outRGBA, width: w, height: h, format: .jpeg, quality: quality)
+        // Use the ADJUSTED dimensions — crop changes them, so w/h from the decode are stale.
+        return try? ImageEncoder.encode(rgba8: outRGBA, width: adjusted.width, height: adjusted.height,
+                                        format: .jpeg, quality: quality)
     }
 }

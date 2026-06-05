@@ -92,4 +92,13 @@ final class ImageEditorTests: XCTestCase {
         let out = ImageEditor.apply(ImageAdjustments(highlights: -1), to: solid(SIMD3<Float>(1, 1, 1)))
         XCTAssertEqual(out.pixels[0].x, 0.5, accuracy: 1e-4)   // 1 + (-1)·0.5·1² = 0.5
     }
+
+    func testStraightenAutoZoomsKeepingDimensionsAndCenter() {
+        var img = PixelImage(width: 9, height: 9, fill: SIMD3<Float>(0.2, 0.2, 0.2))
+        img[4, 4] = SIMD3<Float>(1, 1, 1)              // bright centre
+        let r = ImageEditor.straighten(img, degrees: 10)
+        XCTAssertEqual(r.width, 9)
+        XCTAssertEqual(r.height, 9)                    // dimensions preserved (auto-zoom fills the frame)
+        XCTAssertGreaterThan(r[4, 4].x, 0.5)           // rotation is about the centre → centre stays bright
+    }
 }

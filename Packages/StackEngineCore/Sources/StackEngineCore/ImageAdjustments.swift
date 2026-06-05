@@ -39,6 +39,11 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
     public static let identity = ImageAdjustments()
     public var isIdentity: Bool { self == .identity }
 
+    /// True when any per-pixel tonal control is non-default (lets geometry-only edits skip the tonal pass).
+    public var hasTonalAdjustments: Bool {
+        exposureEV != 0 || contrast != 0 || temperature != 0 || tint != 0 || shadows != 0 || highlights != 0
+    }
+
     // Back-compat: edit sidecars written before the new fields lack those keys — default them.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)

@@ -11,7 +11,8 @@ public enum ImageEditor {
         var out = img
         if adj.straightenDegrees != 0 { out = straighten(out, degrees: adj.straightenDegrees) }
         if adj.cropAspect.ratio != nil { out = crop(out, aspect: adj.cropAspect) }
-        return tonal(adj, out)
+        // Geometry-only edits skip the per-pixel tonal pass entirely.
+        return adj.hasTonalAdjustments ? tonal(adj, out) : out
     }
 
     /// Per-pixel tonal adjustments in linear light: exposure → white balance → contrast about the
@@ -37,16 +38,20 @@ public enum ImageEditor {
         return out
     }
 
-    /// Rotate about the centre by `degrees`, edge-clamped bilinear sampling (keeps dimensions).
+    /// Rotate about the centre by `degrees`, keeping dimensions. Auto-zooms to fill so the rotated
+    /// frame has no empty / edge-smeared corners (the standard "straighten" behaviour).
     static func straighten(_ img: PixelImage, degrees: Float) -> PixelImage {
         let rad = degrees * .pi / 180
         let cosA = cos(rad), sinA = sin(rad)
         let w = img.width, h = img.height
+        // Zoom enough that the back-mapped output frame stays inside the source on both axes.
+        let aspectMax = max(Float(h) / Float(w), Float(w) / Float(h))
+        let scale = abs(cosA) + aspectMax * abs(sinA)
         let cx = Float(w - 1) / 2, cy = Float(h - 1) / 2
         var out = PixelImage(width: w, height: h)
         for y in 0..<h {
             for x in 0..<w {
-                let dx = Float(x) - cx, dy = Float(y) - cy
+                let dx = (Float(x) - cx) / scale, dy = (Float(y) - cy) / scale
                 out[x, y] = bilinear(img, cx + dx * cosA + dy * sinA, cy - dx * sinA + dy * cosA)
             }
         }
