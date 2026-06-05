@@ -41,7 +41,8 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     // Touched only on sessionQueue.
     private var configured = false
 
-    func captureBurst(mode: CaptureMode, frameCount: Int) async throws -> [RawSensorFrame] {
+    func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
+        let frameCount = recipe.frameCount   // genuine duration pacing + video-rate capture is device tuning (verify on hardware)
         try await ensureAuthorized()
         try await ensureConfigured()
         guard !output.availableRawPhotoPixelFormatTypes.isEmpty else { throw CaptureError.noRawFormat }
