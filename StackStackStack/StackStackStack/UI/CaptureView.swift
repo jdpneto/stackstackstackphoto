@@ -7,6 +7,7 @@ struct CaptureView: View {
     @ObservedObject var coordinator: StackCaptureCoordinator
     @State private var lastResult: UIImage?
     @State private var showEditor = false
+    @State private var showPro = false
 
     var body: some View {
         ZStack {
@@ -26,6 +27,7 @@ struct CaptureView: View {
                 }
                 Spacer()
                 lookPicker
+                proPanel
                 statusLabel
                 shutterButton.padding(.bottom, 40)
             }
@@ -91,6 +93,55 @@ struct CaptureView: View {
             }
         }
         .padding(.bottom, 8)
+    }
+
+    private var proPanel: some View {
+        VStack(spacing: 8) {
+            Button(showPro ? "Pro ▴" : "Pro ▾") { showPro.toggle() }
+                .font(.caption).foregroundColor(.white)
+                .accessibilityIdentifier("pro-toggle")
+                .disabled(coordinator.isBusy)
+            if showPro {
+                VStack(spacing: 10) {
+                    optControl("Frames", unit: "",
+                               binding: Binding(get: { coordinator.pro.frameCount.map(Double.init) },
+                                                set: { coordinator.pro.frameCount = $0.map { Int($0.rounded()) } }),
+                               range: 2...40, step: 1,
+                               // Default to the current look's burst length so enabling the control
+                               // doesn't silently change it; the user adjusts from there.
+                               defaultValue: Double(CaptureRecipe.recipe(for: coordinator.mode).frameCount)) { "\(Int($0))" }
+                    optControl("ISO", unit: "",
+                               binding: $coordinator.pro.iso, range: 50...3200, step: 10, defaultValue: 400) { "\(Int($0))" }
+                    optControl("Shutter", unit: "s",
+                               binding: $coordinator.pro.shutterSeconds, range: 0.001...1, step: 0.001, defaultValue: 0.02) {
+                                   String(format: "1/%.0f", 1 / max($0, 0.0001)) }
+                    optControl("Focus", unit: "",
+                               binding: $coordinator.pro.focus, range: 0...1, step: 0.01, defaultValue: 0.5) {
+                                   String(format: "%.2f", $0) }
+                }
+                .padding(.horizontal, 24)
+            }
+        }
+        .padding(.bottom, 4)
+    }
+
+    /// A labelled control that reads "Auto" when off and shows a value slider when on.
+    private func optControl(_ label: String, unit: String, binding: Binding<Double?>,
+                            range: ClosedRange<Double>, step: Double, defaultValue: Double,
+                            format: @escaping (Double) -> String) -> some View {
+        VStack(spacing: 2) {
+            Toggle(isOn: Binding(get: { binding.wrappedValue != nil },
+                                 set: { binding.wrappedValue = $0 ? defaultValue : nil })) {
+                Text(binding.wrappedValue.map { "\(label): \(format($0))\(unit)" } ?? "\(label): Auto")
+                    .font(.caption2).foregroundColor(.white)
+            }
+            .tint(.white)
+            if let v = binding.wrappedValue {
+                Slider(value: Binding(get: { v }, set: { binding.wrappedValue = $0 }), in: range, step: step)
+                    .tint(.white)
+            }
+        }
+        .disabled(coordinator.isBusy)
     }
 }
 

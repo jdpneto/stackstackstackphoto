@@ -45,12 +45,14 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         try await ensureAuthorized()
         try await ensureConfigured()
         guard !output.availableRawPhotoPixelFormatTypes.isEmpty else { throw CaptureError.noRawFormat }
-        try lockExposureAndFocus()
+        try await lockExposureAndFocus(recipe: recipe)   // waits for manual exposure/focus to settle
 
         let frameCount = recipe.frameCount
         // Spread the captures across the recipe's window so long-exposure looks sample motion over
-        // time, rather than firing a back-to-back still burst. (Device path — verify on hardware.)
-        let interval = recipe.durationSeconds / Double(max(frameCount - 1, 1))
+        // time, rather than firing a back-to-back still burst — but never faster than a manual
+        // exposure can actually complete. (Device path — verify on hardware.)
+        let interval = max(recipe.durationSeconds / Double(max(frameCount - 1, 1)),
+                           recipe.manualShutterSeconds ?? 0)
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[RawSensorFrame], Error>) in
             stateQueue.async {
@@ -108,13 +110,49 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
     }
 
-    private func lockExposureAndFocus() throws {
-        guard let dev = device else { throw CaptureError.noDevice }
-        try dev.lockForConfiguration()
-        if dev.isExposureModeSupported(.locked) { dev.exposureMode = .locked }
-        if dev.isFocusModeSupported(.locked) { dev.focusMode = .locked }
-        if dev.isWhiteBalanceModeSupported(.locked) { dev.whiteBalanceMode = .locked }
-        dev.unlockForConfiguration()
+    /// Lock exposure/focus/WB for a stable burst. Honour any manual Pro overrides on the recipe;
+    /// otherwise lock to the metered auto values. Manual values are clamped to the device's range.
+    /// Awaits convergence of any manual exposure/focus so the first frames aren't shot mid-transition.
+    /// The device lock is held only while issuing settings — not across convergence.
+    private func lockExposureAndFocus(recipe: CaptureRecipe) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            guard let dev = self.device else { cont.resume(throwing: CaptureError.noDevice); return }
+            do {
+                try dev.lockForConfiguration()
+            } catch {
+                cont.resume(throwing: error); return
+            }
+            let settle = DispatchGroup()   // fires once any manual exposure/focus has converged
+
+            // Manual exposure (ISO and/or shutter) → custom exposure; else lock the auto value.
+            if recipe.manualISO != nil || recipe.manualShutterSeconds != nil,
+               dev.isExposureModeSupported(.custom) {
+                let fmt = dev.activeFormat
+                let duration: CMTime = recipe.manualShutterSeconds
+                    .map { CMTime(seconds: $0, preferredTimescale: 1_000_000) }
+                    .map { min(max($0, fmt.minExposureDuration), fmt.maxExposureDuration) }
+                    ?? AVCaptureDevice.currentExposureDuration
+                let iso: Float = recipe.manualISO
+                    .map { min(max($0, fmt.minISO), fmt.maxISO) }
+                    ?? AVCaptureDevice.currentISO
+                settle.enter()
+                dev.setExposureModeCustom(duration: duration, iso: iso) { _ in settle.leave() }
+            } else if dev.isExposureModeSupported(.locked) {
+                dev.exposureMode = .locked   // fallback also covers manual-requested but .custom unsupported
+            }
+
+            // Manual focus → locked lens position; else lock focus.
+            if let focus = recipe.manualFocus, dev.isLockingFocusWithCustomLensPositionSupported {
+                settle.enter()
+                dev.setFocusModeLocked(lensPosition: min(max(focus, 0), 1)) { _ in settle.leave() }
+            } else if dev.isFocusModeSupported(.locked) {
+                dev.focusMode = .locked   // fallback also covers manual-requested but custom lens unsupported
+            }
+
+            if dev.isWhiteBalanceModeSupported(.locked) { dev.whiteBalanceMode = .locked }
+            dev.unlockForConfiguration()   // release the lock before awaiting convergence
+            settle.notify(queue: self.sessionQueue) { cont.resume() }
+        }
     }
 
     // MARK: - Completion (always on stateQueue)

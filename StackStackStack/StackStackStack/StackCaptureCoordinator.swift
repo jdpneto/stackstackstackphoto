@@ -11,6 +11,8 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published private(set) var lastResultJPEG: Data?
     /// The currently selected look. Settable from the capture UI.
     @Published var mode: StackMode = .noiseReduction
+    /// Manual Pro overrides (frame count / ISO / shutter / focus). Auto by default.
+    @Published var pro: ProControls = .auto
     /// The id of the most recent saved stack (for the editor).
     @Published private(set) var lastSavedID: UUID?
     /// Read-only access to the library for the editor.
@@ -32,9 +34,10 @@ final class StackCaptureCoordinator: ObservableObject {
     func shoot() async {
         guard !isBusy else { return }   // reject a second shoot while one is already running
         let mode = self.mode            // capture the selected look at shutter-press time (before any await)
+        let pro = self.pro              // …and the manual overrides
         do {
             state = .capturing
-            let frames = try await capture.captureBurst(recipe: .recipe(for: mode))
+            let frames = try await capture.captureBurst(recipe: .recipe(for: mode).applying(pro))
             guard !frames.isEmpty else { state = .failed("No frames were captured."); return }
             state = .processing
             let jpeg = try await Self.makeJPEG(from: frames, mode: mode)   // heavy work, off the main actor
