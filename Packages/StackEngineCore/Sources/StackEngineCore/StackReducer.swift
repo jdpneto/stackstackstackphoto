@@ -1,7 +1,11 @@
 import simd
 
 public enum StackReducer {
-    /// Per-pixel, per-channel sigma-clipped mean across aligned frames.
+    /// Default exposure gain for the low-light-boost look (design §13.3). Named here rather than
+    /// a magic literal at the call site; a tunable/adaptive gain is future Pro-controls work.
+    public static let defaultLowLightGain: Float = 2.0
+
+    /// Per-pixel, per-channel sigma-clipped mean across aligned frames, optionally scaled by `scale`.
     ///
     /// IMPORTANT: a single outlier's maximum z-score is bounded by sqrt(N-1) for N samples,
     /// so with the default `kappa = 2.0` an outlier is only rejectable when N >= 6. For
@@ -9,10 +13,9 @@ public enum StackReducer {
     /// mathematically possible. Use a smaller `kappa` (e.g. 1.5) to clip on small bursts.
     public static func sigmaClippedMean(_ imgs: [PixelImage],
                                         kappa: Float = 2.0,
-                                        iterations: Int = 3) -> PixelImage {
-        precondition(!imgs.isEmpty)
-        let w = imgs[0].width, h = imgs[0].height
-        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
+                                        iterations: Int = 3,
+                                        scale: Float = 1) -> PixelImage {
+        let (w, h) = validatedDimensions(imgs)
         let n = imgs.count
         var out = PixelImage(width: w, height: h)
         // One reusable scratch buffer for the entire image, refilled per pixel/channel —
@@ -45,7 +48,7 @@ public enum StackReducer {
                 }
                 var sum: Float = 0
                 for k in 0..<count { sum += kept[k] }
-                out.pixels[i][ch] = sum / Float(count)
+                out.pixels[i][ch] = (sum / Float(count)) * scale
             }
         }
         return out
@@ -53,9 +56,7 @@ public enum StackReducer {
 
     /// Plain per-pixel temporal mean — keeps scene motion (smooth-motion look).
     public static func mean(_ imgs: [PixelImage]) -> PixelImage {
-        precondition(!imgs.isEmpty)
-        let w = imgs[0].width, h = imgs[0].height
-        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
+        let (w, h) = validatedDimensions(imgs)
         var out = PixelImage(width: w, height: h)
         let inv = 1 / Float(imgs.count)
         for i in 0..<(w * h) {
@@ -68,9 +69,7 @@ public enum StackReducer {
 
     /// Per-channel lighten (max) across frames — light streaks accumulate (light-trails look).
     public static func lighten(_ imgs: [PixelImage]) -> PixelImage {
-        precondition(!imgs.isEmpty)
-        let w = imgs[0].width, h = imgs[0].height
-        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
+        let (w, h) = validatedDimensions(imgs)
         var out = PixelImage(width: w, height: h)
         for i in 0..<(w * h) {
             var m = imgs[0].pixels[i]
@@ -82,10 +81,17 @@ public enum StackReducer {
 
     /// Robust (sigma-clipped) mean with an exposure gain — low-light-boost look. Output may
     /// exceed 1.0 (the output transform clamps). gain > 1 brightens; gain == 1 == noise reduction.
+    /// Folds the gain into the reducer's final divide (single pass over the image).
     public static func boostedMean(_ imgs: [PixelImage], gain: Float) -> PixelImage {
+        precondition(gain > 0, "gain must be > 0")
+        return sigmaClippedMean(imgs, scale: gain)
+    }
+
+    /// Shared input validation for all reducers: non-empty and uniform size.
+    private static func validatedDimensions(_ imgs: [PixelImage]) -> (w: Int, h: Int) {
         precondition(!imgs.isEmpty)
-        var out = sigmaClippedMean(imgs)
-        for i in 0..<out.pixels.count { out.pixels[i] *= gain }
-        return out
+        let w = imgs[0].width, h = imgs[0].height
+        precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
+        return (w, h)
     }
 }

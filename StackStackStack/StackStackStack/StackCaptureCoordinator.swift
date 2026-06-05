@@ -20,16 +20,22 @@ final class StackCaptureCoordinator: ObservableObject {
         self.store = store
     }
 
+    /// True while a capture is in flight (capturing or processing). Used to reject re-entrant taps.
+    var isBusy: Bool {
+        switch state { case .capturing, .processing: return true; default: return false }
+    }
+
     func shoot(frameCount: Int = 8) async {
+        guard !isBusy else { return }   // reject a second shoot while one is already running
+        let mode = self.mode            // capture the selected look at shutter-press time (before any await)
         do {
             state = .capturing
             let frames = try await capture.captureBurst(mode: .noiseReduction, frameCount: frameCount)
             guard !frames.isEmpty else { state = .failed("No frames were captured."); return }
             state = .processing
-            let mode = self.mode
             let jpeg = try await Self.makeJPEG(from: frames, mode: mode)   // heavy work, off the main actor
             lastResultJPEG = jpeg
-            let saved = try store.save(resultJPEG: jpeg, mode: "\(mode)", frameCount: frames.count)
+            let saved = try store.save(resultJPEG: jpeg, mode: mode.rawValue, frameCount: frames.count)
             state = .done(saved.id)
         } catch {
             state = .failed(error.localizedDescription)
