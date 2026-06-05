@@ -67,4 +67,29 @@ final class ImageEditorTests: XCTestCase {
         XCTAssertEqual(adj.cropAspect, .original) // defaulted
         XCTAssertFalse(ImageAdjustments(exposureEV: 1).isIdentity)
     }
+
+    func testCropSquareCentersToSmallerSide() {
+        let out = ImageEditor.apply(ImageAdjustments(cropAspect: .square),
+                                    to: PixelImage(width: 16, height: 8, fill: SIMD3<Float>(0.5, 0.5, 0.5)))
+        XCTAssertEqual(out.width, 8)
+        XCTAssertEqual(out.height, 8)
+    }
+
+    func testStraighten180FlipsRow() {
+        let img = PixelImage(width: 4, height: 1, pixels: [
+            SIMD3<Float>(1, 1, 1), SIMD3<Float>(0, 0, 0), SIMD3<Float>(0, 0, 0), SIMD3<Float>(0, 0, 0)])
+        let r = ImageEditor.straighten(img, degrees: 180)
+        XCTAssertEqual(r[3, 0].x, 1, accuracy: 1e-4)   // bright pixel rotated to the far end
+        XCTAssertEqual(r[0, 0].x, 0, accuracy: 1e-4)
+    }
+
+    func testShadowsLiftBlack() {
+        let out = ImageEditor.apply(ImageAdjustments(shadows: 1), to: solid(SIMD3<Float>(0, 0, 0)))
+        XCTAssertEqual(out.pixels[0].x, 0.5, accuracy: 1e-4)   // 0 + 1·0.5·(1-0)² = 0.5
+    }
+
+    func testHighlightsPullWhite() {
+        let out = ImageEditor.apply(ImageAdjustments(highlights: -1), to: solid(SIMD3<Float>(1, 1, 1)))
+        XCTAssertEqual(out.pixels[0].x, 0.5, accuracy: 1e-4)   // 1 + (-1)·0.5·1² = 0.5
+    }
 }
