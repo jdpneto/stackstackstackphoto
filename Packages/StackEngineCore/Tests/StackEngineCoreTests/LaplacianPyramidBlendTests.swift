@@ -40,4 +40,14 @@ final class LaplacianPyramidBlendTests: XCTestCase {
         XCTAssertGreaterThan(total, SharpnessMap.compute(a).reduce(0, +) * 1.3)
         XCTAssertGreaterThan(total, SharpnessMap.compute(b).reduce(0, +) * 1.3)
     }
+
+    func testNonFiniteWeightsAreTreatedAsNoContribution() {
+        // An Inf/NaN weight must not leak NaN into the composite; it counts as 0 weight.
+        let w = 8, h = 8, n = w * h
+        let a = PixelImage(width: w, height: h, fill: SIMD3<Float>(0.7, 0.7, 0.7))
+        let b = PixelImage(width: w, height: h, fill: SIMD3<Float>(0.3, 0.3, 0.3))
+        var wA = [Float](repeating: 1, count: n); wA[10] = .infinity; wA[20] = .nan
+        let out = LaplacianPyramidBlend.blend(images: [a, b], weights: [wA, [Float](repeating: 0, count: n)])
+        for p in out.pixels { XCTAssertTrue(p.x.isFinite && p.y.isFinite && p.z.isFinite) }
+    }
 }
