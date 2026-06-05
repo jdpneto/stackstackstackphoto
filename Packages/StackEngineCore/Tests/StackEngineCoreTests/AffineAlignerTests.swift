@@ -57,4 +57,22 @@ final class AffineAlignerTests: XCTestCase {
         let aligned = AffineAligner.warp(ref, by: est)
         XCTAssertLessThan(Metrics.maxAbsDiff(aligned, ref), 1e-3)
     }
+
+    func testAlignReducesPureScaleBreathing() {
+        let ref = texture(48, 48)
+        // Pure focus breathing: a 3% magnification, no shift/rotation.
+        let breathing = Transform2D.similarity(scale: 1.03, rotation: 0, tx: 0, ty: 0)
+        let mov = AffineAligner.warp(ref, by: breathing)
+        let beforeDiff = interiorMaxDiff(mov, ref)          // misaligned
+        let aligned = AffineAligner.align(reference: ref, moving: mov)
+        let afterDiff = interiorMaxDiff(aligned, ref)       // aligned
+        XCTAssertLessThan(afterDiff, beforeDiff * 0.5, "alignment must materially reduce the residual")
+        XCTAssertLessThan(afterDiff, 0.05)
+    }
+
+    private func interiorMaxDiff(_ a: PixelImage, _ b: PixelImage) -> Float {
+        var m: Float = 0
+        for y in 10..<38 { for x in 10..<38 { m = max(m, abs(a[x, y].x - b[x, y].x)) } }
+        return m
+    }
 }

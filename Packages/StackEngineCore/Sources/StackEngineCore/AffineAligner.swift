@@ -61,6 +61,12 @@ public enum AffineAligner {
         return .similarity(scale: s, rotation: r, tx: tx, ty: ty)
     }
 
+    /// Estimate the registration of `moving` to `reference` and return `moving` warped into the
+    /// reference frame.
+    public static func align(reference ref: PixelImage, moving mov: PixelImage) -> PixelImage {
+        warp(mov, by: estimate(reference: ref, moving: mov))
+    }
+
     /// Mean SSD between `reference` luma and `moving` luma warped by `t` (centred, bilinear).
     private static func ssdWarped(_ movL: [Float], _ refL: [Float], width w: Int, height h: Int,
                                   by t: Transform2D) -> Float {
