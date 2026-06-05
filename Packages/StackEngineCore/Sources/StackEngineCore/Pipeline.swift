@@ -28,7 +28,7 @@ public enum Pipeline {
         case .noiseReduction: return StackReducer.sigmaClippedMean(aligned) // kappa fixed at 2.0; use noiseReductionImages for an explicit kappa
         case .smoothMotion:   return StackReducer.mean(aligned)
         case .lightTrails:    return StackReducer.lighten(aligned)
-        case .lowLightBoost:  return StackReducer.boostedMean(aligned, gain: 2.0)
+        case .lowLightBoost:  return StackReducer.boostedMean(aligned, gain: StackReducer.defaultLowLightGain)
         }
     }
 

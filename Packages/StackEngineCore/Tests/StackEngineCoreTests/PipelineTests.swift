@@ -134,7 +134,29 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(Pipeline.reduceImages([a, b], mode: .lightTrails, searchRange: 0)[0, 0].x, 0.8, accuracy: 1e-5)
         // lowLightBoost → robust mean (0.5) × 2.0 = 1.0
         XCTAssertEqual(Pipeline.reduceImages([a, b], mode: .lowLightBoost, searchRange: 0)[0, 0].x, 1.0, accuracy: 1e-5)
-        // noiseReduction → robust mean; at N=2 kappa=2.0 can't clip, so = 0.5 (pins the dispatch route)
-        XCTAssertEqual(Pipeline.reduceImages([a, b], mode: .noiseReduction, searchRange: 0)[0, 0].x, 0.5, accuracy: 1e-5)
+
+        // noiseReduction vs smoothMotion MUST differ: 6 frames with one outlier — sigma-clip drops it
+        // (≈0.5) while the plain mean keeps it (≈2.08). This pins the two dispatch arms apart.
+        func flat(_ v: Float) -> PixelImage { PixelImage(width: 1, height: 1, pixels: [SIMD3<Float>(v, v, v)]) }
+        let outlierStack = [flat(0.5), flat(0.5), flat(0.5), flat(0.5), flat(0.5), flat(10.0)]
+        let nr = Pipeline.reduceImages(outlierStack, mode: .noiseReduction, searchRange: 0)[0, 0].x
+        let sm = Pipeline.reduceImages(outlierStack, mode: .smoothMotion, searchRange: 0)[0, 0].x
+        XCTAssertEqual(nr, 0.5, accuracy: 1e-3)                   // outlier clipped
+        XCTAssertEqual(sm, (0.5 * 5 + 10) / 6, accuracy: 1e-3)   // outlier kept
+        XCTAssertGreaterThan(sm - nr, 1.0)                       // the two dispatch arms are distinguishable
+    }
+
+    func testReduceRawPathHandlesAllModes() {
+        let w = 8, h = 8
+        let frames = (0..<3).map { _ in
+            RawSensorFrame(width: w, height: h, mosaic: [UInt16](repeating: 600, count: w * h),
+                           blackLevel: 64, whiteLevel: 1024, cfa: .rggb)
+        }
+        for mode in StackMode.allCases {
+            let result = Pipeline.reduce(frames, mode: mode)
+            XCTAssertEqual(result.width, w, "\(mode)")
+            XCTAssertEqual(result.height, h, "\(mode)")
+            XCTAssertTrue(result[4, 4].x.isFinite, "\(mode)")
+        }
     }
 }
