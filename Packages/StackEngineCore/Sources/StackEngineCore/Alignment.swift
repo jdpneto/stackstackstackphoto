@@ -51,6 +51,72 @@ public enum Alignment {
         return best
     }
 
+    /// Coarse-to-fine integer translation on a luma pyramid: estimate on a heavily-downscaled level
+    /// (cheap, captures large shifts) then refine ±2 per finer level. Cost is ~O(image) instead of
+    /// O(image × searchRange²) — the key to making full-resolution alignment fast on device.
+    /// Collapses to a single-level `±maxShift` box search when the image is already small (so it
+    /// matches `estimateTranslation` for small inputs), and returns identity for `maxShift <= 0`.
+    static func estimateTranslationCoarseToFine(referenceLuma lr: [Float], movingLuma lm: [Float],
+                                                width w: Int, height h: Int,
+                                                maxShift: Int, minDim: Int = 64) -> Translation {
+        if maxShift <= 0 { return Translation(dx: 0, dy: 0) }
+        // Build matching luma pyramids (finest first), halving until the min dimension hits minDim.
+        var refP: [(l: [Float], w: Int, h: Int)] = [(lr, w, h)]
+        var movP: [(l: [Float], w: Int, h: Int)] = [(lm, w, h)]
+        while min(refP.last!.w, refP.last!.h) > minDim {
+            refP.append(halveLuma(refP.last!)); movP.append(halveLuma(movP.last!))
+        }
+        let levels = refP.count
+        var dx = 0, dy = 0
+        for lvl in stride(from: levels - 1, through: 0, by: -1) {   // coarsest → finest
+            let r = refP[lvl], m = movP[lvl]
+            let range = levels == 1 ? maxShift : (lvl == levels - 1 ? max(2, maxShift >> lvl) : 2)
+            (dx, dy) = bestShiftAround(r.l, m.l, width: r.w, height: r.h, baseDx: dx, baseDy: dy, range: range)
+            if lvl > 0 { dx *= 2; dy *= 2 }   // a coarse-pixel shift is 2 fine-pixels
+        }
+        return Translation(dx: dx, dy: dy)
+    }
+
+    /// 2×2 box-downscale of a luma buffer (edge-clamped on odd dimensions).
+    private static func halveLuma(_ p: (l: [Float], w: Int, h: Int)) -> (l: [Float], w: Int, h: Int) {
+        let w = p.w, h = p.h, ow = (w + 1) / 2, oh = (h + 1) / 2
+        var out = [Float](repeating: 0, count: ow * oh)
+        for oy in 0..<oh {
+            let y0 = 2 * oy, y1 = min(y0 + 1, h - 1)
+            for ox in 0..<ow {
+                let x0 = 2 * ox, x1 = min(x0 + 1, w - 1)
+                out[oy * ow + ox] = (p.l[y0 * w + x0] + p.l[y0 * w + x1] + p.l[y1 * w + x0] + p.l[y1 * w + x1]) * 0.25
+            }
+        }
+        return (out, ow, oh)
+    }
+
+    /// Integer shift (dx,dy) in a box of radius `range` around (baseDx,baseDy) minimizing mean luma
+    /// SSD over the overlap, ties broken toward the smaller displacement.
+    private static func bestShiftAround(_ lr: [Float], _ lm: [Float], width w: Int, height h: Int,
+                                        baseDx: Int, baseDy: Int, range r: Int) -> (Int, Int) {
+        var bestDx = baseDx, bestDy = baseDy, bestCost = Float.infinity
+        for dy in (baseDy - r)...(baseDy + r) {
+            let yStart = max(0, -dy), yEnd = min(h, h - dy)
+            if yStart >= yEnd { continue }
+            for dx in (baseDx - r)...(baseDx + r) {
+                let xStart = max(0, -dx), xEnd = min(w, w - dx)
+                if xStart >= xEnd { continue }
+                var cost: Float = 0, count: Float = 0
+                for y in yStart..<yEnd {
+                    let ro = y * w, mo = (y + dy) * w + dx
+                    for x in xStart..<xEnd { let d = lr[ro + x] - lm[mo + x]; cost += d * d; count += 1 }
+                }
+                let mean = cost / count
+                let mag = abs(dx) + abs(dy), bestMag = abs(bestDx) + abs(bestDy)
+                if mean < bestCost - 1e-9 || (mean < bestCost + 1e-9 && mag < bestMag) {
+                    bestCost = mean; bestDx = dx; bestDy = dy
+                }
+            }
+        }
+        return (bestDx, bestDy)
+    }
+
     /// Warp by (dx,dy): out[x,y] = img[x+dx, y+dy] (edge-clamped), aligning `img` to the reference.
     public static func warp(_ img: PixelImage, by t: Translation) -> PixelImage {
         let w = img.width, h = img.height
