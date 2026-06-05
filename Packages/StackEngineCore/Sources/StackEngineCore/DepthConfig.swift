@@ -4,11 +4,17 @@ public struct DepthConfig: Sendable, Equatable {
     public var workingResolution: Int?
     /// Cap on the number of focus brackets actually stacked (memory/time bound).
     public var maxFrames: Int
+    /// Translation-align the brackets to the sharpest reference before stacking. OFF by default:
+    /// focus stacking is classically tripod-based, and an SSD fit over focus brackets (whose content
+    /// changes with focus) can lodge in a spurious shift/warp that smears detail. Robust handheld
+    /// focus-bracket alignment (a focus-invariant estimator) is a documented refinement.
+    public var alignFrames: Bool
 
-    public init(workingResolution: Int?, maxFrames: Int) {
+    public init(workingResolution: Int?, maxFrames: Int, alignFrames: Bool = false) {
         precondition(maxFrames > 0, "maxFrames must be > 0")
         self.workingResolution = workingResolution
         self.maxFrames = maxFrames
+        self.alignFrames = alignFrames
     }
 
     /// Auto (managed): snappy, screen/share-quality — ~1500 px long edge, ~10 brackets.
