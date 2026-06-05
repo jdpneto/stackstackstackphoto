@@ -26,7 +26,7 @@ final class LibraryStore {
         let fileName = "\(id.uuidString).jpg"
         let url = root.appendingPathComponent(fileName)
         try resultJPEG.write(to: url)
-        try resultJPEG.write(to: originalURL(forFileName: fileName))   // immutable original for re-editing
+        try resultJPEG.write(to: originalURL(for: id))   // immutable original for re-editing
         var records = (try? loadAll()) ?? []
         records.insert(StackRecord(id: id, createdAt: Date(), mode: mode,
                                    frameCount: frameCount, resultFileName: fileName), at: 0)
@@ -41,11 +41,8 @@ final class LibraryStore {
 
     func resultURL(for record: StackRecord) -> URL { record.resultURL(in: root) }
 
-    /// The displayed result file URL for an id.
-    func resultURL(forID id: UUID) -> URL { root.appendingPathComponent("\(id.uuidString).jpg") }
-
-    private func originalURL(forFileName fileName: String) -> URL {
-        root.appendingPathComponent((fileName as NSString).deletingPathExtension + ".orig.jpg")
+    private func originalURL(for id: UUID) -> URL {
+        root.appendingPathComponent("\(id.uuidString).orig.jpg")
     }
     private func editsURL(for id: UUID) -> URL {
         root.appendingPathComponent("\(id.uuidString).edits.json")
@@ -53,7 +50,7 @@ final class LibraryStore {
 
     /// The immutable original stacked JPEG, used as the editing source.
     func originalData(for id: UUID) -> Data? {
-        try? Data(contentsOf: originalURL(forFileName: "\(id.uuidString).jpg"))
+        try? Data(contentsOf: originalURL(for: id))
     }
 
     /// The persisted adjustments for a record (identity if none).

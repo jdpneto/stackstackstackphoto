@@ -36,12 +36,14 @@ struct CaptureView: View {
         }
         .sheet(isPresented: $showEditor) {
             if let id = coordinator.lastSavedID, let original = coordinator.library.originalData(for: id) {
-                EditorView(originalJPEG: original, recordId: id, store: coordinator.library) {
-                    // Reflect the saved edit in the on-screen result.
-                    if let data = try? Data(contentsOf: coordinator.library.resultURL(forID: id)) {
-                        lastResult = UIImage(data: data)
-                    }
+                EditorView(originalJPEG: original, recordId: id, store: coordinator.library) { renderedJPEG in
+                    lastResult = UIImage(data: renderedJPEG)   // reflect the edit directly — no disk read
                 }
+            } else {
+                VStack(spacing: 16) {
+                    Text("Couldn't open the editor.").font(.headline)
+                    Button("Close") { showEditor = false }
+                }.padding()
             }
         }
     }
@@ -72,7 +74,10 @@ struct CaptureView: View {
     private var lookPicker: some View {
         HStack(spacing: 8) {
             ForEach(StackMode.allCases, id: \.self) { m in
-                Button { coordinator.mode = m } label: {
+                Button {
+                    if coordinator.mode != m { lastResult = nil }   // changing the look drops the stale result
+                    coordinator.mode = m
+                } label: {
                     Text(m.shortLabel)
                         .font(.caption)
                         .fontWeight(coordinator.mode == m ? .bold : .regular)

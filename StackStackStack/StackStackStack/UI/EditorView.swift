@@ -3,19 +3,21 @@ import UIKit
 import StackEngineCore
 
 /// Non-destructive tonal editor (design §14): exposure / contrast / white balance with a
-/// live preview rendered off the main thread. Save persists the adjustments + rendered result.
+/// downscaled live preview rendered off the main thread. Save persists the adjustments + result.
 struct EditorView: View {
     let originalJPEG: Data
     let recordId: UUID
     let store: LibraryStore
-    var onSaved: () -> Void
+    var onSaved: (Data) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var adj: ImageAdjustments
     @State private var preview: UIImage?
     @State private var renderTask: Task<Void, Never>?
+    @State private var isSaving = false
+    @State private var saveError = false
 
-    init(originalJPEG: Data, recordId: UUID, store: LibraryStore, onSaved: @escaping () -> Void) {
+    init(originalJPEG: Data, recordId: UUID, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
         self.originalJPEG = originalJPEG
         self.recordId = recordId
         self.store = store
@@ -41,9 +43,12 @@ struct EditorView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { save() } }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { save() }.disabled(isSaving) }
             }
             .onAppear { schedulePreview() }
+            .alert("Couldn't save the edit", isPresented: $saveError) {
+                Button("OK", role: .cancel) {}
+            }
         }
     }
 
@@ -55,14 +60,13 @@ struct EditorView: View {
         }.padding(.horizontal)
     }
 
-    /// Render a preview off the main thread, cancelling any in-flight render.
+    /// Render a downscaled preview off the main thread, cancelling any in-flight render.
     private func schedulePreview() {
         renderTask?.cancel()
-        let current = adj
-        let jpeg = originalJPEG
+        let current = adj, jpeg = originalJPEG
         renderTask = Task {
             let data = await Task.detached(priority: .userInitiated) {
-                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85)
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200)
             }.value
             if Task.isCancelled { return }
             preview = data.flatMap { UIImage(data: $0) }
@@ -70,13 +74,22 @@ struct EditorView: View {
     }
 
     private func save() {
+        guard !isSaving else { return }   // reject a re-entrant Save while one is in flight
+        isSaving = true
         let current = adj, jpeg = originalJPEG, theStore = store, id = recordId
         Task {
             let rendered = await Task.detached(priority: .userInitiated) {
                 ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.95)
             }.value
-            if let rendered { try? theStore.applyEdit(id: id, adjustments: current, renderedJPEG: rendered) }
-            onSaved()
+            isSaving = false
+            guard let rendered else { saveError = true; return }   // don't claim success on a failed render
+            do {
+                try theStore.applyEdit(id: id, adjustments: current, renderedJPEG: rendered)
+            } catch {
+                saveError = true
+                return
+            }
+            onSaved(rendered)   // hand the rendered bytes back directly — no disk re-read
             dismiss()
         }
     }
