@@ -18,8 +18,11 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published private(set) var lastSavedID: UUID?
     /// The most recent failure message (capture or processing); cleared when a new shot starts.
     @Published private(set) var lastError: String?
-    /// The currently selected look. Settable from the capture UI.
-    @Published var mode: StackMode = .noiseReduction
+    /// The currently selected look. Settable from the capture UI. Switching looks drops the on-screen
+    /// result (a new look implies a new shot), so the preview and "Saved ✓" don't go stale.
+    @Published var mode: StackMode = .noiseReduction {
+        didSet { if mode != oldValue { lastResultJPEG = nil; lastSavedID = nil; lastError = nil } }
+    }
     /// Manual Pro overrides (frame count / ISO / shutter / focus). Auto by default.
     @Published var pro: ProControls = .auto
     /// Read-only access to the library for the editor.
@@ -74,6 +77,7 @@ final class StackCaptureCoordinator: ObservableObject {
         processingTail = Task { [weak self] in
             await previous?.value                                   // serialize behind earlier jobs
             guard let self else { return }
+            defer { self.processingCount -= 1 }                     // always settle the count
             do {
                 let jpeg = try await Self.makeJPEG(from: frames, mode: mode)   // heavy work, off the MainActor
                 let saved = try self.store.save(resultJPEG: jpeg, mode: mode.rawValue, frameCount: frames.count)
@@ -82,7 +86,6 @@ final class StackCaptureCoordinator: ObservableObject {
             } catch {
                 self.lastError = error.localizedDescription
             }
-            self.processingCount -= 1
         }
     }
 

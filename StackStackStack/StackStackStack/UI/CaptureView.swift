@@ -108,8 +108,7 @@ struct CaptureView: View {
         HStack(spacing: 8) {
             ForEach(StackMode.allCases, id: \.self) { m in
                 Button {
-                    if coordinator.mode != m { lastResult = nil }   // changing the look drops the stale result
-                    coordinator.mode = m
+                    coordinator.mode = m   // the coordinator drops the stale result when the look changes
                 } label: {
                     Text(m.shortLabel)
                         .font(.caption)

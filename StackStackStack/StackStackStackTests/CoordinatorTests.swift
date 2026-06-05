@@ -54,14 +54,25 @@ final class CoordinatorTests: XCTestCase {
     }
 
     @MainActor
-    func testCaptureIsDoneBeforeProcessingFinishes() async throws {
-        // Capture finishes (the arms-up phase) before the background stack does; the shutter stays
-        // gated by isBusy until processing completes.
-        let (coord, _) = makeCoordinator()
+    func testCaptureFinishesAndShutterClearsAfterProcessing() async throws {
+        // Capture (the arms-up phase) finishes when shoot() returns; the shutter is then free only
+        // once the background stack completes.
+        let (coord, store) = makeCoordinator()
         await coord.shoot()
         XCTAssertFalse(coord.isCapturing, "capture should be finished when shoot() returns")
-        XCTAssertTrue(coord.isBusy || coord.processingCount == 0, "shutter is gated while the stack runs")
         await coord.awaitProcessing()
-        XCTAssertFalse(coord.isBusy)
+        XCTAssertFalse(coord.isBusy, "shutter is free once the background stack finishes")
+        XCTAssertEqual(try store.loadAll().count, 1)
+    }
+
+    @MainActor
+    func testChangingLookDropsTheStaleResult() async throws {
+        let (coord, _) = makeCoordinator()
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNotNil(coord.lastResultJPEG)
+        coord.mode = .smoothMotion                  // switch looks → a new shot is implied
+        XCTAssertNil(coord.lastResultJPEG, "switching looks should drop the stale result preview")
+        XCTAssertNil(coord.lastSavedID)
     }
 }
