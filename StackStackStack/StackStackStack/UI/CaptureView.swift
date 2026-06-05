@@ -76,12 +76,19 @@ struct CaptureView: View {
 
     private var statusLabel: some View {
         Group {
-            switch coordinator.state {
-            case .idle: Text("Ready")
-            case .capturing: Text("Capturing…")
-            case .processing: Text("Stacking…")
-            case .done: Text("Done")
-            case .failed(let m): Text("Failed: \(m)").foregroundColor(.red).multilineTextAlignment(.center)
+            if coordinator.isCapturing {
+                Text("Capturing…")
+            } else if coordinator.processingCount > 0 {
+                // Capture is done — the phone can come down while the stack finishes in the background.
+                Text(coordinator.processingCount > 1
+                     ? "Processing \(coordinator.processingCount)… you can lower your phone"
+                     : "Processing… you can lower your phone")
+            } else if let err = coordinator.lastError {
+                Text("Failed: \(err)").foregroundColor(.red).multilineTextAlignment(.center)
+            } else if coordinator.lastResultJPEG != nil {
+                Text("Saved ✓")
+            } else {
+                Text("Ready")
             }
         }.foregroundColor(.white).padding(.horizontal)
     }
@@ -101,8 +108,7 @@ struct CaptureView: View {
         HStack(spacing: 8) {
             ForEach(StackMode.allCases, id: \.self) { m in
                 Button {
-                    if coordinator.mode != m { lastResult = nil }   // changing the look drops the stale result
-                    coordinator.mode = m
+                    coordinator.mode = m   // the coordinator drops the stale result when the look changes
                 } label: {
                     Text(m.shortLabel)
                         .font(.caption)

@@ -33,13 +33,19 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
 
     private let stateQueue = DispatchQueue(label: "com.jdpneto.stackstackstack.capture.state")
     private let sessionQueue = DispatchQueue(label: "com.jdpneto.stackstackstack.capture.session")
+    // Off the capture path: the per-frame RAW→mosaic copy (12 MP) must NOT run in the AVFoundation
+    // delegate callback, or it blocks advancing to the next frame. Hand the photo here instead.
+    private let processingQueue = DispatchQueue(label: "com.jdpneto.stackstackstack.capture.processing")
 
     // Touched only on stateQueue.
     private var pending: [RawSensorFrame] = []
-    private var remaining = 0
+    private var remaining = 0                   // frames still to capture, including the in-flight one
+    private var outstanding = 0                 // RAW→frame conversions still running off the capture path
     private var continuation: CheckedContinuation<[RawSensorFrame], Error>?
-    private var generation = 0                 // bumps per burst; stale captures/timeouts are ignored
-    private var expectedIDs: Set<Int64> = []   // settings.uniqueID of the ACTIVE burst's captures
+    private var generation = 0                  // bumps per burst; stale captures/timeouts are ignored
+    private var currentID: Int64?               // settings.uniqueID of the in-flight capture (nil between frames)
+    private var rawType: OSType = 0             // Bayer RAW format used to build each frame's settings
+    private var perFrameTimeout = 0.0           // watchdog horizon for a single capture
     // Touched only on sessionQueue.
     private var configured = false
 
@@ -49,13 +55,9 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         try await lockExposureAndFocus(recipe: recipe)   // waits for manual exposure/focus to settle
 
         let frameCount = recipe.frameCount
-        // Spread the captures across the recipe's window so long-exposure looks sample motion over
-        // time — but never faster than a manual exposure can complete (so captures don't overlap).
-        let interval = max(recipe.durationSeconds / Double(max(frameCount - 1, 1)),
-                           recipe.manualShutterSeconds ?? 0)
-        // Watchdog horizon: the whole scheduled span plus generous slack, so a dropped delegate
-        // callback (session interruption, thermal, backgrounding) can't hang the burst forever.
-        let timeout = interval * Double(frameCount) + max(recipe.manualShutterSeconds ?? 0, 1.0) * 3 + 5.0
+        // Per-frame watchdog: if a single capture never reports completion (interruption, thermal,
+        // drop) we end the burst with the frames gathered so far, instead of hanging.
+        let frameTimeout = max(recipe.manualShutterSeconds ?? 0, 1.0) * 3 + 4.0
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[RawSensorFrame], Error>) in
             self.stateQueue.async {
@@ -70,29 +72,78 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 }
 
                 self.generation += 1
-                let gen = self.generation
                 self.pending = []
+                self.outstanding = 0
                 self.continuation = cont
                 self.remaining = frameCount
-                // Build distinct settings up-front so the delegate can tie each callback to THIS
-                // burst by uniqueID (and ignore stragglers from an abandoned earlier burst).
-                let settingsList = (0..<frameCount).map { _ in AVCapturePhotoSettings(rawPixelFormatType: rawType) }
-                self.expectedIDs = Set(settingsList.map { $0.uniqueID })
-
-                for (i, settings) in settingsList.enumerated() {
-                    self.sessionQueue.asyncAfter(deadline: .now() + interval * Double(i)) {
-                        // Don't fire a capture for a burst that was superseded, or on a stopped session.
-                        let active = self.stateQueue.sync { self.generation == gen }
-                        guard active, self.session.isRunning else { return }
-                        self.output.capturePhoto(with: settings, delegate: self)
-                    }
-                }
-                self.stateQueue.asyncAfter(deadline: .now() + timeout) {
-                    guard self.generation == gen, self.continuation != nil else { return }
-                    self.finishLocked()   // resume with whatever frames arrived (or noFramesProduced)
-                }
+                self.currentID = nil
+                self.rawType = rawType
+                self.perFrameTimeout = frameTimeout
+                self.startNextFrameLocked(gen: self.generation)
             }
         }
+    }
+
+    /// Issue the next capture in the burst, or finish if none remain. Must run on `stateQueue`.
+    /// In-flight RAW requests are bounded to exactly one — the still-image (Iris) pipeline bails
+    /// (FigCapture err -12773) and wedges the session if requests overlap, so the previous frame
+    /// must fully complete (`didFinishCaptureFor`) before the next one is requested.
+    private func startNextFrameLocked(gen: Int) {
+        guard self.generation == gen, self.continuation != nil else { return }
+        guard self.remaining > 0 else { self.maybeFinishLocked(); return }
+
+        let settings = AVCapturePhotoSettings(rawPixelFormatType: self.rawType)
+        settings.photoQualityPrioritization = .speed   // minimize per-frame capture latency
+        let id = settings.uniqueID
+        self.currentID = id
+
+        self.sessionQueue.async {
+            // Don't fire for a superseded burst or a stopped session — fail this frame so the burst
+            // advances instead of stalling until the watchdog.
+            let active = self.stateQueue.sync { self.generation == gen }
+            guard active, self.session.isRunning else {
+                self.stateQueue.async { self.advanceLocked(completedID: id) }
+                return
+            }
+            self.output.capturePhoto(with: settings, delegate: self)
+        }
+
+        self.stateQueue.asyncAfter(deadline: .now() + self.perFrameTimeout) {
+            self.timeoutFrameLocked(stuckID: id)   // no-op if the frame already completed
+        }
+    }
+
+    /// Watchdog: a capture that hasn't reported back within `perFrameTimeout` is treated as a stall.
+    /// Stop requesting NEW frames (don't advance — firing the next capture while a stalled, maybe
+    /// still-in-flight request lingers would re-create the FigCapture -12773 overlap this sequential
+    /// design avoids), but still wait for any already-captured frames to finish converting off-queue
+    /// before resuming, so we don't drop them. Must run on `stateQueue`.
+    private func timeoutFrameLocked(stuckID: Int64) {
+        guard self.continuation != nil, self.currentID == stuckID else { return }   // already advanced
+        self.currentID = nil
+        self.remaining = 0            // request no more frames…
+        self.maybeFinishLocked()      // …but finish only once outstanding conversions drain
+    }
+
+    /// Mark the in-flight capture `completedID` finished, then immediately request the next frame
+    /// (back-to-back — the arms-up capture step must be as fast as the pipeline allows; the previous
+    /// request is fully done by `didFinishCaptureFor`, so there's no overlap). Idempotent per frame:
+    /// the real callback and the watchdog both call this, but only the first (while
+    /// `currentID == completedID`) takes effect. Must run on `stateQueue`.
+    private func advanceLocked(completedID: Int64) {
+        guard self.continuation != nil, self.currentID == completedID else { return }
+        self.currentID = nil
+        self.remaining -= 1
+        guard self.remaining > 0 else { self.maybeFinishLocked(); return }
+        self.startNextFrameLocked(gen: self.generation)
+    }
+
+    /// Resume the continuation once every capture has been requested AND every off-queue conversion
+    /// has finished — otherwise the last frame(s) could be dropped while still converting. Must run
+    /// on `stateQueue`.
+    private func maybeFinishLocked() {
+        guard self.continuation != nil, self.remaining <= 0, self.outstanding == 0 else { return }
+        self.finishLocked()
     }
 
     /// Start the camera (authorize → configure → run) and return a preview layer bound to the
@@ -138,7 +189,9 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     // ProRAW (the 48 MP quad-Bayer path) — 4× less data, better low-light stacking,
                     // and the size the CPU develop+stack pipeline can actually handle. ProRAW off.
                     if self.output.isAppleProRAWSupported { self.output.isAppleProRAWEnabled = false }
-                    self.output.maxPhotoQualityPrioritization = .balanced   // lower per-frame burst latency
+                    // We develop the RAW ourselves, so the system's quality processing is wasted work —
+                    // prioritize speed to minimize per-frame latency (the arms-up capture must be fast).
+                    self.output.maxPhotoQualityPrioritization = .speed
                     self.session.commitConfiguration()
                     self.session.startRunning()  // off the main thread (sessionQueue)
                     self.device = dev
@@ -209,7 +262,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private func finishLocked() {
         guard let cont = continuation else { return }
         continuation = nil
-        expectedIDs = []           // ignore any late stragglers
+        currentID = nil            // ignore any late stragglers / watchdog fires
         let frames = pending
         pending = []
         if frames.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
@@ -220,14 +273,31 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
 extension AVCaptureService: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput,
                      didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        // Convert outside the state queue (touches no shared state), then mutate state serially.
-        let frame = error == nil ? RawFrameConverter.make(from: photo) : nil
+        // Do NOT convert here — `RawFrameConverter.make` copies a 12 MP buffer, and this callback runs
+        // BEFORE `didFinishCaptureFor`, so converting inline would stall the next frame. Hand the photo
+        // to the processing queue and let capture advance immediately; collect the frame when it's ready.
         let id = photo.resolvedSettings.uniqueID
         stateQueue.async {
-            guard self.expectedIDs.remove(id) != nil else { return }   // not from the active burst → ignore
-            if let frame { self.pending.append(frame) }
-            self.remaining -= 1
-            if self.remaining <= 0 { self.finishLocked() }
+            guard self.continuation != nil, id == self.currentID else { return }   // stale/superseded
+            let gen = self.generation
+            self.outstanding += 1
+            self.processingQueue.async {
+                let frame = error == nil ? RawFrameConverter.make(from: photo) : nil
+                self.stateQueue.async {
+                    guard self.continuation != nil, self.generation == gen else { return }   // burst ended/superseded
+                    if let frame { self.pending.append(frame) }
+                    self.outstanding -= 1
+                    self.maybeFinishLocked()
+                }
+            }
         }
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        // Last callback for a capture: the still-image pipeline is now free, so it's safe to request
+        // the next frame. Advancing only here is what bounds in-flight requests to one.
+        let id = resolvedSettings.uniqueID
+        stateQueue.async { self.advanceLocked(completedID: id) }
     }
 }

@@ -21,9 +21,12 @@ struct CaptureRecipe: Sendable, Equatable {
         self.manualFocus = manualFocus
     }
 
-    /// Per-look capture policy. Frame counts trade noise/motion-sampling against memory + time;
-    /// durations are the wall-clock window the device burst is paced over (so long-exposure looks
-    /// sample motion across time). Tunable; the unit test only pins the relative ordering.
+    /// Per-look capture policy. Frame counts trade noise/motion-sampling against memory + time.
+    /// The device burst is SEQUENTIAL and back-to-back (next frame fires the instant the previous
+    /// one completes), so the arms-up capture is as fast as the camera allows; the frame count is
+    /// what spreads a long-exposure look across time. `durationSeconds` documents each look's
+    /// intended exposure character (and the natural back-to-back span already exceeds these short
+    /// windows); it is not used to add inter-frame delay. The unit test only pins relative ordering.
     static func recipe(for mode: StackMode) -> CaptureRecipe {
         switch mode {
         case .noiseReduction: return CaptureRecipe(frameCount: 8,  durationSeconds: 0.5)

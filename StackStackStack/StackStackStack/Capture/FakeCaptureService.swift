@@ -14,6 +14,7 @@ struct FakeCaptureService: CaptureService {
     func startPreview() async -> CALayer? { nil }
 
     func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
+        await Task.yield()   // model a non-instant capture so the shutter's re-entrancy guard applies
         let n = max(recipe.frameCount, 1)
         return (0..<n).map { k in
             var mosaic = [UInt16](repeating: 0, count: width * height)
