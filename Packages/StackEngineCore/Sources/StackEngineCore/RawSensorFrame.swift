@@ -45,6 +45,9 @@ func cfaColor(_ pattern: CFAPattern, _ x: Int, _ y: Int) -> CFAColor {
 }
 
 @inline(__always) func linearizeSample(_ v: UInt16, black: Float, white: Float) -> Float {
-    let x = (Float(v) - black) / (white - black)
-    return min(max(x, 0), 1)
+    let denom = white - black
+    guard denom > 0 else { return 0 }                 // degenerate metadata (white <= black) → no signal
+    // Clamp only the LOW end; preserve highlight headroom (>1) so per-channel white balance applied
+    // downstream keeps clipped highlights neutral. The high clamp happens at the output transform.
+    return max((Float(v) - black) / denom, 0)
 }

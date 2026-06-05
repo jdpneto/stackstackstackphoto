@@ -3,7 +3,9 @@ import simd
 
 public enum OutputTransform {
     @inline(__always) private static func linearToSRGB(_ c: Float) -> Float {
-        let x = min(max(c, 0), 1)
+        // NaN-safe: min/max clamp ±Inf correctly (+Inf→1, -Inf→0) but do NOT strip NaN, which would
+        // reach UInt8(NaN) → trap. Only NaN needs special-casing → 0.
+        let x = c.isNaN ? 0 : min(max(c, 0), 1)
         if x <= 0.0031308 { return x * 12.92 }
         return Float(1.055 * Foundation.pow(Double(x), 1.0 / 2.4) - 0.055)
     }

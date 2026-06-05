@@ -34,11 +34,18 @@ final class RawSensorFrameTests: XCTestCase {
         XCTAssertEqual(cfaColor(.gbrg, 1, 1), .green)
     }
     func testLinearizeSample() {
-        // (v - black) / (white - black), clamped
+        // (v - black) / (white - black), LOW-clamped only (highlight headroom preserved).
         XCTAssertEqual(linearizeSample(64, black: 64, white: 1024), 0.0, accuracy: 1e-6)
         XCTAssertEqual(linearizeSample(1024, black: 64, white: 1024), 1.0, accuracy: 1e-6)
         XCTAssertEqual(linearizeSample(544, black: 64, white: 1024), 0.5, accuracy: 1e-6)
-        XCTAssertEqual(linearizeSample(0, black: 64, white: 1024), 0.0, accuracy: 1e-6) // clamped
-        XCTAssertEqual(linearizeSample(2048, black: 64, white: 1024), 1.0, accuracy: 1e-6) // clamped above white
+        XCTAssertEqual(linearizeSample(0, black: 64, white: 1024), 0.0, accuracy: 1e-6) // clamped to 0
+        // Above white: NOT clamped — headroom is kept so white balance keeps clipped highlights neutral.
+        XCTAssertEqual(linearizeSample(2048, black: 64, white: 1024), 1984.0 / 960.0, accuracy: 1e-6)
+    }
+
+    func testLinearizeHandlesDegenerateLevels() {
+        // white <= black (missing/degenerate metadata) must not divide by zero or return NaN.
+        XCTAssertEqual(linearizeSample(500, black: 1024, white: 1024), 0.0)   // white == black
+        XCTAssertEqual(linearizeSample(500, black: 1024, white: 64), 0.0)     // white < black
     }
 }
