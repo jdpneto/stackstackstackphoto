@@ -44,10 +44,12 @@ public enum ImageEditor {
         let rad = degrees * .pi / 180
         let cosA = cos(rad), sinA = sin(rad)
         let w = img.width, h = img.height
-        // Zoom enough that the back-mapped output frame stays inside the source on both axes.
-        let aspectMax = max(Float(h) / Float(w), Float(w) / Float(h))
-        let scale = abs(cosA) + aspectMax * abs(sinA)
         let cx = Float(w - 1) / 2, cy = Float(h - 1) / 2
+        // Zoom so every output corner back-maps inside the source half-extents (no edge-smeared corners).
+        // Derived from the actual extents cx,cy (not w/h) so it's exact for non-square frames too.
+        let needX = cx > 0 ? (cx * abs(cosA) + cy * abs(sinA)) / cx : 1
+        let needY = cy > 0 ? (cx * abs(sinA) + cy * abs(cosA)) / cy : 1
+        let scale = max(needX, needY, 1)
         var out = PixelImage(width: w, height: h)
         for y in 0..<h {
             for x in 0..<w {

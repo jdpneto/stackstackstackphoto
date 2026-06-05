@@ -101,4 +101,13 @@ final class ImageEditorTests: XCTestCase {
         XCTAssertEqual(r.height, 9)                    // dimensions preserved (auto-zoom fills the frame)
         XCTAssertGreaterThan(r[4, 4].x, 0.5)           // rotation is about the centre → centre stays bright
     }
+
+    func testStraightenNonSquareExtremeAngleKeepsDimensions() {
+        // Exercises the non-square auto-zoom path at the UI's max angle (regression for the
+        // w/h vs (w-1)/(h-1) under-zoom that left a corner sliver on wide frames).
+        let r = ImageEditor.straighten(PixelImage(width: 16, height: 8, fill: SIMD3<Float>(0.3, 0.3, 0.3)),
+                                       degrees: 15)
+        XCTAssertEqual(r.width, 16)
+        XCTAssertEqual(r.height, 8)
+    }
 }
