@@ -14,16 +14,20 @@ public enum Pipeline {
         aligned.reserveCapacity(imgs.count)
         for (i, im) in imgs.enumerated() {
             if i == refIdx { aligned.append(im); continue }
-            let t = Alignment.estimateTranslation(referenceLuma: lumas[refIdx], movingLuma: lumas[i],
-                                                  width: w, height: h, searchRange: searchRange)
+            // Coarse-to-fine on a luma pyramid: O(image) instead of O(image × searchRange²).
+            let t = Alignment.estimateTranslationCoarseToFine(referenceLuma: lumas[refIdx], movingLuma: lumas[i],
+                                                              width: w, height: h, maxShift: searchRange)
             aligned.append(Alignment.warp(im, by: t))
         }
         return aligned
     }
 
-    /// Align then apply the look's reducer.
-    public static func reduceImages(_ imgs: [PixelImage], mode: StackMode, searchRange: Int = 8) -> PixelImage {
-        let aligned = alignedStack(imgs, searchRange: searchRange)
+    /// Align then apply the look's reducer. `workingResolution` (long-edge px, nil = full) downscales
+    /// the developed frames before align/stack — the dominant lever for on-device speed + memory,
+    /// since alignment and stacking cost scale with pixel count.
+    public static func reduceImages(_ imgs: [PixelImage], mode: StackMode, searchRange: Int = 8,
+                                    workingResolution: Int? = nil) -> PixelImage {
+        let aligned = alignedStack(downscale(imgs, maxEdge: workingResolution), searchRange: searchRange)
         switch mode {
         case .noiseReduction: return StackReducer.sigmaClippedMean(aligned) // kappa fixed at 2.0; use noiseReductionImages for an explicit kappa
         case .smoothMotion:   return StackReducer.mean(aligned)
@@ -32,9 +36,22 @@ public enum Pipeline {
         }
     }
 
-    /// End-to-end from raw frames: develop each → align → reduce for the chosen look.
-    public static func reduce(_ frames: [RawSensorFrame], mode: StackMode, searchRange: Int = 8) -> PixelImage {
-        reduceImages(frames.map { ColorPipeline.process($0) }, mode: mode, searchRange: searchRange)
+    /// End-to-end from raw frames: develop each → (downscale) → align → reduce for the chosen look.
+    public static func reduce(_ frames: [RawSensorFrame], mode: StackMode, searchRange: Int = 8,
+                              workingResolution: Int? = nil) -> PixelImage {
+        reduceImages(frames.map { ColorPipeline.process($0) }, mode: mode, searchRange: searchRange,
+                     workingResolution: workingResolution)
+    }
+
+    /// Halve (Gaussian reduce) each frame until its long edge is within `maxEdge` (nil = no downscale).
+    /// Frames start equal-size and reduce deterministically, so they stay equal-size.
+    private static func downscale(_ imgs: [PixelImage], maxEdge: Int?) -> [PixelImage] {
+        guard let maxEdge, maxEdge >= 1 else { return imgs }   // <1 would loop forever (reduce floors at 1)
+        return imgs.map { img in
+            var out = img
+            while max(out.width, out.height) > maxEdge { out = ImagePyramid.reduce(out) }
+            return out
+        }
     }
 
     // MARK: - Noise-reduction-specific entry points (kept for the golden harness/tests)

@@ -146,6 +146,14 @@ final class PipelineTests: XCTestCase {
         XCTAssertGreaterThan(sm - nr, 1.0)                       // the two dispatch arms are distinguishable
     }
 
+    func testReduceImagesDownscalesToWorkingResolution() {
+        // workingResolution caps the long edge before align/stack (the on-device speed lever).
+        let big = (0..<3).map { _ in PixelImage(width: 64, height: 48, fill: SIMD3<Float>(0.5, 0.5, 0.5)) }
+        let out = Pipeline.reduceImages(big, mode: .smoothMotion, searchRange: 2, workingResolution: 20)
+        XCTAssertLessThanOrEqual(max(out.width, out.height), 20)
+        XCTAssertGreaterThan(out.width, 0)
+    }
+
     func testReduceRawPathHandlesAllModes() {
         let w = 8, h = 8
         let frames = (0..<3).map { _ in

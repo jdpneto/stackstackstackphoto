@@ -120,7 +120,11 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     self.session.sessionPreset = .photo
                     if self.session.canAddInput(input) { self.session.addInput(input) }
                     if self.session.canAddOutput(self.output) { self.session.addOutput(self.output) }
-                    self.output.maxPhotoQualityPrioritization = .quality   // best RAW quality
+                    // #3 efficient RAW: use the sensor's classic ~12 MP BINNED Bayer readout, NOT
+                    // ProRAW (the 48 MP quad-Bayer path) — 4× less data, better low-light stacking,
+                    // and the size the CPU develop+stack pipeline can actually handle. ProRAW off.
+                    if self.output.isAppleProRAWSupported { self.output.isAppleProRAWEnabled = false }
+                    self.output.maxPhotoQualityPrioritization = .balanced   // lower per-frame burst latency
                     self.session.commitConfiguration()
                     self.session.startRunning()  // off the main thread (sessionQueue)
                     self.device = dev

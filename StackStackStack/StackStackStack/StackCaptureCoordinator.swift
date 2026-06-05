@@ -50,12 +50,18 @@ final class StackCaptureCoordinator: ObservableObject {
         }
     }
 
-    /// CPU-heavy develop → align → stack → encode, run off the MainActor to keep the UI responsive.
-    /// NOTE: long-exposure looks stack ~30 frames; on-device this is the slow path until Metal
-    /// acceleration + a capture/processing progress UI land (both deferred per the roadmap §19).
+    /// Managed working resolution (long-edge px) the stack is processed at. Full-sensor RAW (~12 MP)
+    /// × N frames through a CPU align+stack is minutes-slow on device; downscaling the developed
+    /// frames to this before align/stack is the dominant speed + memory win (results stay sharp at
+    /// screen/share sizes). A full-resolution Pro tier is a follow-up.
+    nonisolated private static let managedWorkingResolution = 2400
+
+    /// CPU-heavy develop → downscale → align → stack → encode, run off the MainActor to keep the UI
+    /// responsive. Processing at a managed resolution keeps this to seconds on device; full-res +
+    /// Metal acceleration + a progress UI are roadmap items.
     nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
-            let result = Pipeline.reduce(frames, mode: mode)
+            let result = Pipeline.reduce(frames, mode: mode, workingResolution: managedWorkingResolution)
             let rgba = OutputTransform.encodeSRGB8(result)
             return try ImageEncoder.encode(rgba8: rgba, width: result.width, height: result.height,
                                            format: .jpeg, quality: 0.95)
