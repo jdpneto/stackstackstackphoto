@@ -11,7 +11,9 @@ struct GalleryView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 4) {
                 ForEach(records) { rec in
-                    ThumbnailCell(url: store.resultURL(for: rec))
+                    // version = updatedAt so an edited result's cell reloads (the file bytes changed
+                    // but the URL didn't).
+                    ThumbnailCell(url: store.resultURL(for: rec), version: rec.updatedAt ?? rec.createdAt)
                 }
             }.padding(4)
         }
@@ -23,6 +25,7 @@ struct GalleryView: View {
 /// A single gallery cell that loads a downsampled thumbnail off the main thread.
 private struct ThumbnailCell: View {
     let url: URL
+    let version: Date
     @State private var image: UIImage?
 
     var body: some View {
@@ -35,7 +38,10 @@ private struct ThumbnailCell: View {
         }
         .frame(height: 110)
         .clipped()
-        .task(id: url) { image = await Thumbnailer.load(url, maxPixel: 240) }
+        // Re-run when either the URL or the version changes (an edit bumps version → reload).
+        .task(id: "\(url.path)#\(version.timeIntervalSince1970)") {
+            image = await Thumbnailer.load(url, maxPixel: 240)
+        }
     }
 }
 
