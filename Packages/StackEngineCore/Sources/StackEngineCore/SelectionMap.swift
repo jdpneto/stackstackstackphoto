@@ -21,7 +21,12 @@ public enum SelectionMap {
                                                 radius: radius, eps: eps) }
         for i in 0..<n {
             var sum: Float = 0
-            for k in 0..<m { reg[k][i] = max(reg[k][i], 0); sum += reg[k][i] }
+            for k in 0..<m {
+                // Sanitize non-finite (a NaN/Inf from upstream) to 0 explicitly, rather than relying
+                // on max() arg-order to absorb it; sum/renormalize then handles it as "no weight".
+                reg[k][i] = reg[k][i].isFinite ? max(reg[k][i], 0) : 0
+                sum += reg[k][i]
+            }
             if sum > 0 { for k in 0..<m { reg[k][i] /= sum } }
             else { for k in 0..<m { reg[k][i] = 1 / Float(m) } }
         }

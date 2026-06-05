@@ -25,4 +25,19 @@ final class SelectionMapTests: XCTestCase {
         XCTAssertEqual(weights[0][0], 0.5, accuracy: 1e-4)
         XCTAssertEqual(weights[1][0], 0.5, accuracy: 1e-4)
     }
+
+    func testNonFiniteInputsDoNotLeakNaN() {
+        // A NaN/Inf sharpness or guide value must not leak into the weights; it degrades to no-weight.
+        let w = 6, h = 6, n = w * h
+        var bad = [Float](repeating: 0.5, count: n); bad[n / 2] = .infinity
+        let ok = [Float](repeating: 0.5, count: n)
+        var guide = [Float](repeating: 0.5, count: n); guide[0] = .nan
+        let weights = SelectionMap.weights(sharpness: [bad, ok], guide: guide, width: w, height: h)
+        for k in 0..<2 {
+            for v in weights[k] {
+                XCTAssertTrue(v.isFinite); XCTAssertGreaterThanOrEqual(v, 0); XCTAssertLessThanOrEqual(v, 1)
+            }
+        }
+        for i in 0..<n { XCTAssertEqual(weights[0][i] + weights[1][i], 1.0, accuracy: 1e-3) }   // still sums to 1
+    }
 }
