@@ -35,27 +35,32 @@ final class LibraryStore {
         // pointing at a file that isn't there.
         try resultJPEG.write(to: url, options: Self.writeOptions)
         try resultJPEG.write(to: originalURL(for: id), options: Self.writeOptions)   // immutable original
-        var records = (try? loadAll()) ?? []
+        var records = (try? loadRaw()) ?? []
         records.insert(StackRecord(id: id, createdAt: now, mode: mode, frameCount: frameCount,
                                    resultFileName: fileName, updatedAt: now), at: 0)
         try persist(records)
         return SavedStack(id: id, resultURL: url)
     }
 
+    /// All persisted records for DISPLAY: self-heals by dropping records whose result file is gone.
+    /// Mutations (save/delete/applyEdit) use `loadRaw` instead, so a transient read-time miss can
+    /// never feed back into a `persist` and permanently drop a still-recoverable record.
     func loadAll() throws -> [StackRecord] {
+        try loadRaw().filter { fm.fileExists(atPath: resultURL(for: $0).path) }
+    }
+
+    /// The raw decoded index, unfiltered. On a corrupt/torn index, the bytes are preserved aside
+    /// (timestamped, so an earlier recoverable snapshot isn't clobbered) and [] returned — rather
+    /// than letting the next save overwrite and permanently drop every prior record.
+    private func loadRaw() throws -> [StackRecord] {
         guard let data = try? Data(contentsOf: indexURL) else { return [] }
-        let records: [StackRecord]
         do {
-            records = try JSONDecoder().decode([StackRecord].self, from: data)
+            return try JSONDecoder().decode([StackRecord].self, from: data)
         } catch {
-            // Corrupt/torn index: preserve the bytes for recovery instead of silently returning []
-            // (which would let the next save overwrite and permanently drop every prior record).
-            try? fm.removeItem(at: corruptIndexURL)
-            try? fm.moveItem(at: indexURL, to: corruptIndexURL)
+            let aside = root.appendingPathComponent("index.\(Int(Date().timeIntervalSince1970)).corrupt")
+            try? fm.moveItem(at: indexURL, to: aside)
             return []
         }
-        // Self-heal: drop records whose result file is gone (a partial save/delete/external removal).
-        return records.filter { fm.fileExists(atPath: resultURL(for: $0).path) }
     }
 
     func resultURL(for record: StackRecord) -> URL { record.resultURL(in: root) }
@@ -65,19 +70,21 @@ final class LibraryStore {
         for url in [resultURL(forID: id), originalURL(for: id), editsURL(for: id)] {
             try? fm.removeItem(at: url)
         }
-        var records = (try? loadAll()) ?? []
+        var records = (try? loadRaw()) ?? []
         records.removeAll { $0.id == id }
         try persist(records)
     }
 
     /// Delete `<uuid>.*` files that have no matching index record (orphans from failed/partial saves).
+    /// MainActor-only: must not interleave with `save` (which writes files before the index entry).
     func reconcileOrphans() {
-        let ids = Set(((try? loadAll()) ?? []).map { $0.id.uuidString })
+        let ids = Set(((try? loadRaw()) ?? []).map { $0.id.uuidString })   // raw → keep files for records present
         guard let files = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
         for f in files {
             let name = f.lastPathComponent
-            guard name.hasSuffix(".jpg") || name.hasSuffix(".json"), name != "index.json",
-                  name != corruptIndexURL.lastPathComponent else { continue }
+            // Only consider per-stack files; index.json and index.<epoch>.corrupt end in .json/.corrupt
+            // (the former is excluded by name, the latter doesn't match these suffixes).
+            guard name.hasSuffix(".jpg") || name.hasSuffix(".json"), name != "index.json" else { continue }
             let uuidPart = String(name.prefix(36))   // "<uuid>.jpg" / "<uuid>.orig.jpg" / "<uuid>.edits.json"
             if !ids.contains(uuidPart) { try? fm.removeItem(at: f) }
         }
@@ -86,7 +93,6 @@ final class LibraryStore {
     private func resultURL(forID id: UUID) -> URL { root.appendingPathComponent("\(id.uuidString).jpg") }
     private func originalURL(for id: UUID) -> URL { root.appendingPathComponent("\(id.uuidString).orig.jpg") }
     private func editsURL(for id: UUID) -> URL { root.appendingPathComponent("\(id.uuidString).edits.json") }
-    private var corruptIndexURL: URL { root.appendingPathComponent("index.json.corrupt") }
 
     /// The immutable original stacked JPEG, used as the editing source.
     func originalData(for id: UUID) -> Data? {
@@ -105,7 +111,7 @@ final class LibraryStore {
     func applyEdit(id: UUID, adjustments: ImageAdjustments, renderedJPEG: Data) throws {
         try renderedJPEG.write(to: resultURL(forID: id), options: Self.writeOptions)
         try JSONEncoder().encode(adjustments).write(to: editsURL(for: id), options: Self.writeOptions)
-        var records = (try? loadAll()) ?? []
+        var records = (try? loadRaw()) ?? []
         if let i = records.firstIndex(where: { $0.id == id }) {
             records[i].updatedAt = Date()
             try persist(records)

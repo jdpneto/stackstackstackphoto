@@ -71,6 +71,8 @@ final class LibraryStoreTests: XCTestCase {
         // Corrupt the index, then load: it should return [] but move the bytes aside for recovery.
         try Data("{ not json".utf8).write(to: dir.appendingPathComponent("index.json"))
         XCTAssertEqual(try store.loadAll().count, 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("index.json.corrupt").path))
+        let corruptPreserved = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
+            .contains { $0.hasSuffix(".corrupt") } ?? false
+        XCTAssertTrue(corruptPreserved, "corrupt index bytes should be moved aside, not overwritten")
     }
 }
