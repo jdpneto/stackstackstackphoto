@@ -48,6 +48,8 @@ final class StackCaptureCoordinator: ObservableObject {
     }
 
     /// CPU-heavy develop → align → stack → encode, run off the MainActor to keep the UI responsive.
+    /// NOTE: long-exposure looks stack ~30 frames; on-device this is the slow path until Metal
+    /// acceleration + a capture/processing progress UI land (both deferred per the roadmap §19).
     nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
             let result = Pipeline.reduce(frames, mode: mode)

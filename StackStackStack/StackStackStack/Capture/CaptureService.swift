@@ -6,6 +6,15 @@ struct CaptureRecipe: Sendable, Equatable {
     var frameCount: Int
     var durationSeconds: Double
 
+    init(frameCount: Int, durationSeconds: Double) {
+        precondition(frameCount > 0, "frameCount must be > 0")
+        self.frameCount = frameCount
+        self.durationSeconds = durationSeconds
+    }
+
+    /// Per-look capture policy. Frame counts trade noise/motion-sampling against memory + time;
+    /// durations are the wall-clock window the device burst is paced over (so long-exposure looks
+    /// sample motion across time). Tunable; the unit test only pins the relative ordering.
     static func recipe(for mode: StackMode) -> CaptureRecipe {
         switch mode {
         case .noiseReduction: return CaptureRecipe(frameCount: 8,  durationSeconds: 0.5)
