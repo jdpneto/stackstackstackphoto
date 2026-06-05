@@ -31,7 +31,37 @@ enum RawFrameConverter {
         let (black, white) = blackWhiteLevels(from: photo.metadata)
         return RawSensorFrame(width: w, height: h, mosaic: mosaic,
                               blackLevel: black, whiteLevel: white, cfa: cfaPattern(for: fmt),
-                              wbGains: SIMD3<Float>(1, 1, 1))
+                              wbGains: whiteBalanceGains(from: photo.metadata))
+    }
+
+    /// Per-channel white-balance gains from the DNG AsShotNeutral, read from the capture metadata.
+    /// Without these the un-balanced Bayer (green has 2× the sites) comes out green-cast.
+    static func whiteBalanceGains(from metadata: [String: Any]) -> SIMD3<Float> {
+        let dng = metadata[kCGImagePropertyDNGDictionary as String] as? [String: Any]
+        guard let neutral = floatArray(dng?[kCGImagePropertyDNGAsShotNeutral as String]) else {
+            return SIMD3<Float>(1, 1, 1)
+        }
+        return gains(fromAsShotNeutral: neutral)
+    }
+
+    /// AsShotNeutral is the camera-RGB of a neutral patch; dividing by it white-balances. Normalized
+    /// green-relative (green gain = 1) so it neutralizes the cast without changing overall exposure.
+    static func gains(fromAsShotNeutral neutral: [Float]) -> SIMD3<Float> {
+        guard neutral.count == 3, neutral[0] > 0, neutral[1] > 0, neutral[2] > 0 else {
+            return SIMD3<Float>(1, 1, 1)
+        }
+        let g = neutral[1]
+        return SIMD3<Float>(g / neutral[0], 1, g / neutral[2])
+    }
+
+    /// DNG numeric metadata can arrive as an NSNumber array or a space-separated string.
+    private static func floatArray(_ value: Any?) -> [Float]? {
+        if let arr = value as? [NSNumber] { return arr.map { $0.floatValue } }
+        if let s = value as? String {
+            let parts = s.split(whereSeparator: { $0 == " " || $0 == "," }).compactMap { Float($0) }
+            return parts.isEmpty ? nil : parts
+        }
+        return nil
     }
 
     /// Bayer RAW pixel formats we can read as a single-plane 16-bit mosaic.
