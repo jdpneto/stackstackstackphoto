@@ -5,23 +5,34 @@ import ImageIO
 struct GalleryView: View {
     @State private var records: [StackRecord] = []
     @State private var selected: StackRecord?
+    @State private var loaded = false
     private let store = LibraryStore()
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 4)]
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 4) {
-                ForEach(records) { rec in
-                    // Tap a thumbnail to open it full-screen (share / edit / delete).
-                    Button { selected = rec } label: {
-                        // version = updatedAt so an edited result's cell reloads (the file bytes
-                        // changed but the URL didn't).
-                        ThumbnailCell(url: store.resultURL(for: rec), version: rec.updatedAt ?? rec.createdAt)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("stack-\(rec.id.uuidString)")
+        Group {
+            if loaded && records.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo.on.rectangle.angled").font(.largeTitle).foregroundColor(.secondary)
+                    Text("No stacks yet").font(.headline)
+                    Text("Capture one from the Capture tab.").font(.subheadline).foregroundColor(.secondary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 4) {
+                        ForEach(records) { rec in
+                            // Tap a thumbnail to open it full-screen (share / edit / delete).
+                            Button { selected = rec } label: {
+                                // version = updatedAt so an edited result's cell reloads (the file
+                                // bytes changed but the URL didn't).
+                                ThumbnailCell(url: store.resultURL(for: rec), version: rec.updatedAt ?? rec.createdAt)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("stack-\(rec.id.uuidString)")
+                        }
+                    }.padding(4)
                 }
-            }.padding(4)
+            }
         }
         .navigationTitle("Stacks")
         // Load the index off the main thread (re-runs when the tab re-appears, picking up edits).
@@ -34,6 +45,7 @@ struct GalleryView: View {
     private func reload() async {
         let lib = store
         records = await Task.detached(priority: .userInitiated) { (try? lib.loadAll()) ?? [] }.value
+        loaded = true
     }
 }
 

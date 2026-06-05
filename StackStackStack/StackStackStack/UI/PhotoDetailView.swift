@@ -12,7 +12,9 @@ struct PhotoDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var image: UIImage?
+    @State private var loaded = false
     @State private var editSource: EditSource?
+    @State private var sharing = false
     @State private var confirmingDelete = false
 
     /// Everything the editor needs, loaded off the main thread before the sheet is presented.
@@ -29,19 +31,22 @@ struct PhotoDetailView: View {
                 Color.black.ignoresSafeArea()
                 if let image {
                     Image(uiImage: image).resizable().scaledToFit()
+                } else if loaded {
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle")
+                        Text("Couldn't load this photo.")
+                    }.foregroundColor(.white)
                 } else {
                     ProgressView().tint(.white)
                 }
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .navigationBarLeading) {
                     Button("Done") { dismiss() }
                 }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    // Sharing the result file URL surfaces "Save Image" (→ Photos), AirDrop, Messages, etc.
-                    ShareLink(item: store.resultURL(for: record)) {
-                        Image(systemName: "square.and.arrow.up")
-                    }
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button { sharing = true } label: { Image(systemName: "square.and.arrow.up") }
+                        .accessibilityLabel("Share")
                     Button { openEditor() } label: { Image(systemName: "slider.horizontal.3") }
                         .accessibilityLabel("Edit")
                     Button(role: .destructive) { confirmingDelete = true } label: { Image(systemName: "trash") }
@@ -51,7 +56,15 @@ struct PhotoDetailView: View {
             .toolbarBackground(.visible, for: .navigationBar)
         }
         // Decode a screen-sized image off the main thread (full-res would be wasteful for a viewer).
-        .task { image = await Thumbnailer.load(store.resultURL(for: record), maxPixel: 2048) }
+        .task {
+            image = await Thumbnailer.load(store.resultURL(for: record), maxPixel: 2048)
+            loaded = true
+        }
+        // Share the result file URL — the activity sheet's "Save Image" writes it to the camera roll
+        // (and AirDrop/Messages/etc. get the full-quality JPEG).
+        .sheet(isPresented: $sharing) {
+            ShareSheet(items: [store.resultURL(for: record)])
+        }
         .sheet(item: $editSource) { src in
             EditorView(originalJPEG: src.original, initialAdjustments: src.adjustments,
                        initialPreview: src.preview, recordId: src.id, store: store) { renderedJPEG in
@@ -89,4 +102,14 @@ struct PhotoDetailView: View {
         onChanged()
         dismiss()
     }
+}
+
+/// Thin wrapper over `UIActivityViewController` so the standard share sheet (incl. "Save Image" →
+/// camera roll) is available from SwiftUI.
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
