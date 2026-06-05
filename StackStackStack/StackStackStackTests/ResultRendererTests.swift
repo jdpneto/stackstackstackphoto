@@ -1,4 +1,5 @@
 import XCTest
+import ImageIO
 import StackEngineCore
 @testable import StackStackStack
 
@@ -41,5 +42,26 @@ final class ResultRendererTests: XCTestCase {
         let (rgba, w, h) = try XCTUnwrap(ImageDecoder.rgba8(from: rendered))
         XCTAssertEqual(w, 8); XCTAssertEqual(h, 8)        // centre-cropped to the smaller side
         XCTAssertEqual(rgba.count, w * h * 4)             // buffer matches the reported dimensions
+    }
+
+    func testRenderReturnsNilOnGarbageInput() {
+        // Corrupt / non-image data must fail soft (nil), not trap an engine precondition.
+        XCTAssertNil(ResultRenderer.render(originalJPEG: Data([0x00, 0x01, 0x02, 0x03, 0x04]),
+                                           adjustments: .identity))
+        XCTAssertNil(ResultRenderer.render(originalJPEG: Data(),
+                                           adjustments: ImageAdjustments(exposureEV: 1)))
+    }
+
+    func testRenderedJPEGCarriesNoGPSMetadata() throws {
+        // Privacy property: the develop→encode path builds JPEGs from raw RGBA with no metadata
+        // dictionary, so a saved/edited result must never carry GPS/location.
+        let img = PixelImage(width: 4, height: 4, fill: SIMD3<Float>(0.4, 0.4, 0.4))
+        let jpeg = try ImageEncoder.encode(rgba8: OutputTransform.encodeSRGB8(img),
+                                           width: 4, height: 4, format: .jpeg, quality: 1.0)
+        let rendered = try XCTUnwrap(ResultRenderer.render(originalJPEG: jpeg,
+                                                           adjustments: ImageAdjustments(exposureEV: 1)))
+        let src = try XCTUnwrap(CGImageSourceCreateWithData(rendered as CFData, nil))
+        let props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
+        XCTAssertNil(props[kCGImagePropertyGPSDictionary], "rendered result must carry no GPS metadata")
     }
 }
