@@ -87,4 +87,23 @@ final class AffineAlignerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(scale, 0.5 - 1e-3)   // clamp floor held
         XCTAssertLessThanOrEqual(scale, 2.0 + 1e-3)      // clamp ceiling held
     }
+
+    func testEstimateRecoversSimilarityOnDetailedImage() {
+        // A realistic detailed image: a low-frequency ramp (disambiguates translation) plus
+        // high-frequency texture (which traps a single-resolution search in a local minimum).
+        // Coarse-to-fine locks onto the ramp at coarse levels, then refines the detail.
+        let w = 64, h = 64
+        var ref = PixelImage(width: w, height: h)
+        for y in 0..<h { for x in 0..<w {
+            let fx = Float(x) / Float(w - 1), fy = Float(y) / Float(h - 1)
+            let v = 0.15 + 0.4 * (fx + fy) / 2 + 0.22 * sin(0.7 * Float(x)) * sin(0.6 * Float(y))
+            ref[x, y] = SIMD3<Float>(v, v, v)
+        }}
+        let known = Transform2D.similarity(scale: 1.03, rotation: 0.015, tx: 2, ty: -1)
+        let mov = AffineAligner.warp(ref, by: known)
+        let aligned = AffineAligner.align(reference: ref, moving: mov)
+        var maxd: Float = 0
+        for y in 16..<48 { for x in 16..<48 { maxd = max(maxd, abs(aligned[x, y].x - ref[x, y].x)) } }
+        XCTAssertLessThan(maxd, 0.08, "coarse-to-fine alignment registers a detailed frame")
+    }
 }

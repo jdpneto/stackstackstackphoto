@@ -20,37 +20,46 @@ public enum AffineAligner {
     }
 
     /// Estimate the similarity transform that best aligns `moving` to `reference`, minimising luma
-    /// SSD. Coarse integer-translation init (reuses Alignment.estimateTranslation) then a
-    /// deterministic Hooke–Jeeves pattern search over scale / rotation / sub-pixel translation,
-    /// with scale clamped to a sane range.
-    ///
-    /// PHASE-1 FOUNDATION: single-resolution search, validated on well-conditioned (smooth) inputs.
-    /// A coarse-to-fine luma Gaussian pyramid is REQUIRED — not merely a precision upgrade — before
-    /// this runs on real high-frequency or full-sensor-resolution frames: the SSD surface is then
-    /// multimodal (local-minima risk) and the full-res cost is large. It is a prerequisite for the
-    /// FocusStacker integration (spec §3.2).
+    /// SSD. COARSE-TO-FINE over a Gaussian luma pyramid: the coarsest level is smooth (no aliasing →
+    /// a global basin), then each finer level refines. scale/rotation are resolution-invariant;
+    /// translation doubles per finer level. Robust on real high-frequency frames.
     public static func estimate(reference ref: PixelImage, moving mov: PixelImage,
                                 translationSearch: Int = 8) -> Transform2D {
         precondition(ref.width == mov.width && ref.height == mov.height)
-        let w = ref.width, h = ref.height
-        let refL = Luma.luminance(ref), movL = Luma.luminance(mov)
+        let refPyr = ImagePyramid.gaussian(ref, minSize: 24)
+        let movPyr = ImagePyramid.gaussian(mov, minSize: 24)
+        let levels = refPyr.count
+        var s: Float = 1, r: Float = 0, tx: Float = 0, ty: Float = 0
+        for lvl in stride(from: levels - 1, through: 0, by: -1) {   // coarsest → finest
+            let rL = Luma.luminance(refPyr[lvl]), mL = Luma.luminance(movPyr[lvl])
+            let lw = refPyr[lvl].width, lh = refPyr[lvl].height
+            (s, r, tx, ty) = refine(rL, mL, width: lw, height: lh, s: s, r: r, tx: tx, ty: ty,
+                                    translationInit: lvl == levels - 1 ? translationSearch : 0)
+            if lvl > 0 { tx *= 2; ty *= 2 }   // propagate translation to the next finer level
+        }
+        return .similarity(scale: s, rotation: r, tx: tx, ty: ty)
+    }
 
-        // Coarse integer translation handles handheld shift; the search refines the rest.
-        let t0 = Alignment.estimateTranslation(referenceLuma: refL, movingLuma: movL,
-                                               width: w, height: h, searchRange: translationSearch)
-        var s: Float = 1, r: Float = 0, tx = Float(t0.dx), ty = Float(t0.dy)
-
+    /// One pyramid level of the deterministic Hooke–Jeeves search over scale / rotation / sub-pixel
+    /// translation, starting from `(s,r,tx,ty)`. `translationInit > 0` seeds translation by an integer
+    /// SSD search (only needed at the coarsest level). Scale is clamped to a sane range.
+    private static func refine(_ refL: [Float], _ movL: [Float], width w: Int, height h: Int,
+                               s s0: Float, r r0: Float, tx tx0: Float, ty ty0: Float,
+                               translationInit: Int) -> (Float, Float, Float, Float) {
+        var s = s0, r = r0, tx = tx0, ty = ty0
+        if translationInit > 0 {
+            let t0 = Alignment.estimateTranslation(referenceLuma: refL, movingLuma: movL,
+                                                   width: w, height: h, searchRange: translationInit)
+            tx = Float(t0.dx); ty = Float(t0.dy)
+        }
         func cost(_ s: Float, _ r: Float, _ tx: Float, _ ty: Float) -> Float {
             ssdWarped(movL, refL, width: w, height: h,
                       by: .similarity(scale: s, rotation: r, tx: tx, ty: ty))
         }
-
         var best = cost(s, r, tx, ty)
         var stepS: Float = 0.05, stepR: Float = 0.04, stepT: Float = 1.0
-        let minScale: Float = 0.5, maxScale: Float = 2.0   // bar a degenerate / mirror-flipped scale
+        let minScale: Float = 0.5, maxScale: Float = 2.0
         var guardCount = 0
-        // The loop normally exits via stepT shrinking below the sub-pixel threshold; the iteration
-        // cap is only a safety backstop against a pathological never-converging cost surface.
         while stepT > 0.01 && guardCount < 1000 {
             guardCount += 1
             var improved = false
@@ -62,15 +71,13 @@ public enum AffineAligner {
             ]
             for (dS, dR, dTx, dTy) in trials {
                 let ns = s + dS
-                if ns < minScale || ns > maxScale { continue }   // never accept a degenerate scale
+                if ns < minScale || ns > maxScale { continue }
                 let c = cost(ns, r + dR, tx + dTx, ty + dTy)
-                if c < best - 1e-9 {
-                    best = c; s = ns; r += dR; tx += dTx; ty += dTy; improved = true
-                }
+                if c < best - 1e-9 { best = c; s = ns; r += dR; tx += dTx; ty += dTy; improved = true }
             }
             if !improved { stepS *= 0.5; stepR *= 0.5; stepT *= 0.5 }
         }
-        return .similarity(scale: s, rotation: r, tx: tx, ty: ty)
+        return (s, r, tx, ty)
     }
 
     /// Estimate the registration of `moving` to `reference` and return `moving` warped into the
