@@ -4,6 +4,7 @@ import ImageIO
 
 struct GalleryView: View {
     @State private var records: [StackRecord] = []
+    @State private var selected: StackRecord?
     private let store = LibraryStore()
     private let columns = [GridItem(.adaptive(minimum: 110), spacing: 4)]
 
@@ -11,18 +12,28 @@ struct GalleryView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 4) {
                 ForEach(records) { rec in
-                    // version = updatedAt so an edited result's cell reloads (the file bytes changed
-                    // but the URL didn't).
-                    ThumbnailCell(url: store.resultURL(for: rec), version: rec.updatedAt ?? rec.createdAt)
+                    // Tap a thumbnail to open it full-screen (share / edit / delete).
+                    Button { selected = rec } label: {
+                        // version = updatedAt so an edited result's cell reloads (the file bytes
+                        // changed but the URL didn't).
+                        ThumbnailCell(url: store.resultURL(for: rec), version: rec.updatedAt ?? rec.createdAt)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("stack-\(rec.id.uuidString)")
                 }
             }.padding(4)
         }
         .navigationTitle("Stacks")
         // Load the index off the main thread (re-runs when the tab re-appears, picking up edits).
-        .task {
-            let lib = store
-            records = await Task.detached(priority: .userInitiated) { (try? lib.loadAll()) ?? [] }.value
+        .task { await reload() }
+        .fullScreenCover(item: $selected) { rec in
+            PhotoDetailView(record: rec, store: store) { Task { await reload() } }
         }
+    }
+
+    private func reload() async {
+        let lib = store
+        records = await Task.detached(priority: .userInitiated) { (try? lib.loadAll()) ?? [] }.value
     }
 }
 
