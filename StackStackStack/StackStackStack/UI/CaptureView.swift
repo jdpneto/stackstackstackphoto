@@ -39,6 +39,11 @@ struct CaptureView: View {
                 lookPicker
                 proPanel
                 statusLabel
+                if coordinator.processingCount > 0 {
+                    Button("Cancel") { coordinator.cancelProcessing() }
+                        .buttonStyle(.bordered).tint(.white)
+                        .accessibilityIdentifier("cancel-processing")
+                }
                 shutterButton.padding(.bottom, 40)
             }
         }
