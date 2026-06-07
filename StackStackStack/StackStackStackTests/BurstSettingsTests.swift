@@ -2,12 +2,13 @@ import XCTest
 @testable import StackStackStack
 
 final class BurstSettingsTests: XCTestCase {
-    func testPhotoCountIsClampedToTwoThroughTwenty() {
-        XCTAssertEqual(BurstSettings(photoCount: 99, durationSeconds: 5).photoCount, CaptureRecipe.maxBurstFrames)
+    func testPhotoCountIsClampedToTwoThroughMax() {
+        XCTAssertEqual(BurstSettings.maxPhotoCount, 30, "long-exposure (streaming) burst cap")
+        XCTAssertEqual(BurstSettings(photoCount: 99, durationSeconds: 5).photoCount, BurstSettings.maxPhotoCount)
         XCTAssertEqual(BurstSettings(photoCount: 0, durationSeconds: 5).photoCount, 2)
         XCTAssertEqual(BurstSettings(photoCount: 2, durationSeconds: 5).photoCount, 2)                       // lower boundary inclusive
-        XCTAssertEqual(BurstSettings(photoCount: CaptureRecipe.maxBurstFrames, durationSeconds: 5).photoCount, CaptureRecipe.maxBurstFrames) // upper boundary inclusive
-        XCTAssertEqual(BurstSettings(photoCount: 10, durationSeconds: 5).photoCount, 10)
+        XCTAssertEqual(BurstSettings(photoCount: BurstSettings.maxPhotoCount, durationSeconds: 5).photoCount, BurstSettings.maxPhotoCount) // upper boundary inclusive
+        XCTAssertEqual(BurstSettings(photoCount: 25, durationSeconds: 5).photoCount, 25)                     // within the new range (was clamped at 20)
     }
 
     func testDurationIsClampedToOneThroughSixty() {

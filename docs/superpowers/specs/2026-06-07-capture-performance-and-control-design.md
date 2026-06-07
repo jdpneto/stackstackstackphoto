@@ -1,6 +1,6 @@
 # Capture Performance & Control Overhaul — Design
 
-**Status:** Approved design (brainstorm).
+**Status:** Approved design (brainstorm). **Amended 2026-06-07** (post on-device timing): the long-exposure (streaming) burst cap raised from 20 → **30** frames; the static/Pro in-memory batch cap stays **20**. Release timing on an iPhone 14 Pro Max: 18–20-frame Smooth stacks complete in ~8–9 s (vs ~80 s in Debug), so 30 frames stays well under the "<1 min" bar with no OOM (streaming bounds memory). Where the body below says "2–20" for the long-exposure burst, read "2–30".
 **Parent spec:** `docs/superpowers/specs/2026-06-04-stack-stack-stack-photography-design.md` (the "bible").
 **Related plans:** `docs/superpowers/plans/2026-06-05-phase1-continuous-burst.md`, `docs/superpowers/plans/2026-06-05-phase1-long-exposure.md`, `docs/superpowers/plans/2026-06-05-phase1-pro-controls.md`.
 
@@ -26,7 +26,7 @@ iOS first; the engine changes stay pure-Swift, deterministic, and golden-tested 
 | Memory strategy | **Streaming/incremental stack** for long-exposure looks (fold one frame at a time, discard it) | Peak memory bound by ~1–2 frames + accumulators instead of all-N; kills the ~3 GB jetsam crash. |
 | Alignment anchor (streaming) | **First frame** is the anchor | Streaming can't hold all frames to pick the *sharpest*; for handheld long exposures the anchor choice matters far less than for noise reduction, and the steadiness gate keeps all frames near one pose. Static looks keep sharpest-anchor selection. |
 | Burst controls | **Long-exposure looks only**: Photos (2–20, default 10) + Duration (1–60 s) as **vertical edge sliders** with a live numeric readout | Matches the user's mental model; the controls exist only where variable burst length/timing is meaningful. |
-| Frame cap | **Global hard cap of 20** (Pro frames override max drops 40 → 20) | A single concrete bound that prevents the worst memory blowups even before streaming. |
+| Frame cap | **Long-exposure (streaming) burst: 30** (`BurstSettings.maxPhotoCount`); **static/Pro in-memory batch override: 20** (`CaptureRecipe.maxBurstFrames`, down from 40) | Streaming bounds memory regardless of count, so the long-exposure cap is a speed/UX bound (<1 min in Release); the batch path (sigma-clip, can't stream) keeps the tighter 20 for memory safety. |
 | Cancellation | **Cancel discards** the in-flight stack (no save, no error); shutter stays locked during processing (no shoot-while-processing) | Capturing during all-core processing crashes the still pipeline (FigCapture -12773); cancel is the escape hatch instead of waiting out a long stack. |
 | Steadiness source | **CoreMotion `deviceMotion` attitude** (not raw integrated gyro) | Attitude/gravity is drift-free; raw-gyro integration drifts over a 60 s window. |
 | Steadiness behavior | **Gate the burst**: don't fire a frame (incl. the first) while off-pose; reschedule until steady or a per-frame gate timeout | Protects long exposures from frames shot mid-shake; the duration window gives room to wait. |

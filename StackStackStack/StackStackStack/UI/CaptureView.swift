@@ -168,7 +168,7 @@ struct CaptureView: View {
                         get: { Double(coordinator.burst.photoCount) },
                         set: { coordinator.burst = BurstSettings(photoCount: Int($0.rounded()),
                                                                  durationSeconds: coordinator.burst.durationSeconds) }),
-                    range: 2...Double(CaptureRecipe.maxBurstFrames), step: 1)
+                    range: 2...Double(BurstSettings.maxPhotoCount), step: 1)
                 Spacer()
                 verticalBurstControl(
                     title: "Time",
