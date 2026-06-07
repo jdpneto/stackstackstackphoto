@@ -45,6 +45,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private var generation = 0                  // bumps per burst; stale captures/timeouts are ignored
     private var currentID: Int64?               // settings.uniqueID of the in-flight capture (nil between frames)
     private var rawType: OSType = 0             // Bayer RAW format used to build each frame's settings
+    private var pacingInterval = 0.0            // delay between consecutive captures (see captureBurst)
     private var perFrameTimeout = 0.0           // watchdog horizon for a single capture
     // Touched only on sessionQueue.
     private var configured = false
@@ -55,8 +56,13 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         try await lockExposureAndFocus(recipe: recipe)   // waits for manual exposure/focus to settle
 
         let frameCount = recipe.frameCount
-        // Per-frame watchdog: if a single capture never reports completion (interruption, thermal,
-        // drop) we end the burst with the frames gathered so far, instead of hanging.
+        // Delay between consecutive captures: spreads a long-exposure look's frames across the recipe
+        // window so motion is sampled over time, and keeps the RAW pipeline from being overrun. (The
+        // ~8-frame burst stall was the slow buffer copy holding RAW buffers — fixed in
+        // RawFrameConverter — so this floor is small.)
+        let pacing = max(recipe.durationSeconds / Double(max(frameCount - 1, 1)), 0.05)
+        // Per-frame watchdog: if a single capture never reports completion (interruption, drop) we
+        // end the burst with the frames gathered so far, instead of hanging.
         let frameTimeout = max(recipe.manualShutterSeconds ?? 0, 1.0) * 3 + 4.0
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[RawSensorFrame], Error>) in
@@ -78,6 +84,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 self.remaining = frameCount
                 self.currentID = nil
                 self.rawType = rawType
+                self.pacingInterval = pacing
                 self.perFrameTimeout = frameTimeout
                 self.startNextFrameLocked(gen: self.generation)
             }
@@ -125,17 +132,20 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         self.maybeFinishLocked()      // …but finish only once outstanding conversions drain
     }
 
-    /// Mark the in-flight capture `completedID` finished, then immediately request the next frame
-    /// (back-to-back — the arms-up capture step must be as fast as the pipeline allows; the previous
-    /// request is fully done by `didFinishCaptureFor`, so there's no overlap). Idempotent per frame:
-    /// the real callback and the watchdog both call this, but only the first (while
-    /// `currentID == completedID`) takes effect. Must run on `stateQueue`.
+    /// Mark the in-flight capture `completedID` finished, then request the next frame after
+    /// `pacingInterval` — never back-to-back: the RAW pipeline stalls after ~7 rapid captures, so it
+    /// needs time to drain between frames. Idempotent per frame: the real callback and the watchdog
+    /// both call this, but only the first (while `currentID == completedID`) takes effect. Must run
+    /// on `stateQueue`.
     private func advanceLocked(completedID: Int64) {
         guard self.continuation != nil, self.currentID == completedID else { return }
         self.currentID = nil
         self.remaining -= 1
         guard self.remaining > 0 else { self.maybeFinishLocked(); return }
-        self.startNextFrameLocked(gen: self.generation)
+        let gen = self.generation
+        self.stateQueue.asyncAfter(deadline: .now() + self.pacingInterval) {
+            self.startNextFrameLocked(gen: gen)
+        }
     }
 
     /// Resume the continuation once every capture has been requested AND every off-queue conversion

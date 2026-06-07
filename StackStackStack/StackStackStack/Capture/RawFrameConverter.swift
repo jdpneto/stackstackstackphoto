@@ -23,10 +23,16 @@ enum RawFrameConverter {
         guard w > 0, h > 0, rowBytes >= w * MemoryLayout<UInt16>.stride,
               let base = CVPixelBufferGetBaseAddress(px) else { return nil }
 
+        // memcpy each row (not a per-pixel Swift loop): this holds the locked RAW buffer for ~ms
+        // instead of hundreds of ms, so the capture's RAW buffer pool isn't exhausted during a long
+        // burst (which stalled the burst at ~8 frames). rowBytes may exceed w*2 (padding) → copy w.
         var mosaic = [UInt16](repeating: 0, count: w * h)
-        for y in 0..<h {
-            let row = base.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt16.self)
-            for x in 0..<w { mosaic[y * w + x] = row[x] }
+        let rowCopyBytes = w * MemoryLayout<UInt16>.stride
+        mosaic.withUnsafeMutableBytes { dst in
+            guard let dstBase = dst.baseAddress else { return }
+            for y in 0..<h {
+                memcpy(dstBase.advanced(by: y * rowCopyBytes), base.advanced(by: y * rowBytes), rowCopyBytes)
+            }
         }
         let (black, white) = blackWhiteLevels(from: photo.metadata)
         return RawSensorFrame(width: w, height: h, mosaic: mosaic,
