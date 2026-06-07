@@ -123,6 +123,9 @@ struct CaptureView: View {
     }
 
     /// iOS-style focus square at the last tap. Transient for a tap, persistent while AE/AF locked.
+    /// `.ignoresSafeArea()` matches the positioning origin to the preview's full-screen coordinate
+    /// space — the gesture reports `location(in:)` against the safe-area-ignoring preview host, so
+    /// without this the square would be offset by the safe-area (dynamic island) inset.
     @ViewBuilder private var focusIndicatorOverlay: some View {
         if let fi = focusIndicator {
             Rectangle()
@@ -130,6 +133,7 @@ struct CaptureView: View {
                 .frame(width: 80, height: 80)
                 .scaleEffect(focusSquareScale)
                 .position(fi.point)
+                .ignoresSafeArea()
                 .allowsHitTesting(false)
                 .accessibilityIdentifier("focus-indicator")
         }
