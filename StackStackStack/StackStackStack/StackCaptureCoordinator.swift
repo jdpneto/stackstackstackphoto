@@ -98,14 +98,36 @@ final class StackCaptureCoordinator: ObservableObject {
     /// screen/share sizes). A full-resolution Pro tier is a follow-up.
     nonisolated private static let managedWorkingResolution = 2400
 
+    /// DEBUG: dump the developed frames (the exact alignment input) for one capture so the handheld
+    /// registration can be debugged offline on real data. Off for release; remove before merge.
+    nonisolated private static let dumpFramesForDiagnostics = true
+
     /// CPU-heavy develop → downscale → align → stack → encode, run off the MainActor.
     nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
-            let result = Pipeline.reduce(frames, mode: mode, workingResolution: managedWorkingResolution,
-                                         binnedDevelop: true)   // fast half-res develop for the managed path
+            // Develop+downscale once, optionally dump for diagnostics, then align+reduce on the result.
+            let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
+                                                     workingResolution: managedWorkingResolution)
+            if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
+            let result = Pipeline.reduceImages(developed, mode: mode, workingResolution: managedWorkingResolution)
             let rgba = OutputTransform.encodeSRGB8(result)
             return try ImageEncoder.encode(rgba8: rgba, width: result.width, height: result.height,
                                            format: .jpeg, quality: 0.95)
         }.value
+    }
+
+    /// Write each developed frame as a JPEG into Documents/diag (clearing any prior dump), so the
+    /// most recent capture's alignment input can be pulled off the device.
+    nonisolated private static func dumpDevelopedFrames(_ imgs: [PixelImage]) {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("diag", isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for (i, img) in imgs.enumerated() {
+            let rgba = OutputTransform.encodeSRGB8(img)
+            guard let data = try? ImageEncoder.encode(rgba8: rgba, width: img.width, height: img.height,
+                                                      format: .jpeg, quality: 0.95) else { continue }
+            try? data.write(to: dir.appendingPathComponent(String(format: "frame%02d.jpg", i)))
+        }
     }
 }

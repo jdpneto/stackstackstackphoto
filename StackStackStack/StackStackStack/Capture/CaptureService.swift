@@ -22,17 +22,19 @@ struct CaptureRecipe: Sendable, Equatable {
     }
 
     /// Per-look capture policy. Frame counts trade noise/motion-sampling against memory + time.
-    /// The device burst is SEQUENTIAL and back-to-back (next frame fires the instant the previous
-    /// one completes), so the arms-up capture is as fast as the camera allows; the frame count is
-    /// what spreads a long-exposure look across time. `durationSeconds` documents each look's
-    /// intended exposure character (and the natural back-to-back span already exceeds these short
-    /// windows); it is not used to add inter-frame delay. The unit test only pins relative ordering.
+    /// The device burst is SEQUENTIAL and PACED by `durationSeconds / (frameCount-1)`: frames can't
+    /// fire fully back-to-back (the RAW pipeline stalls after ~7), and pacing also spreads a
+    /// long-exposure look's frames across its window so motion is sampled over time. The unit test
+    /// only pins relative ordering.
     static func recipe(for mode: StackMode) -> CaptureRecipe {
         switch mode {
         case .noiseReduction: return CaptureRecipe(frameCount: 8,  durationSeconds: 0.5)
         case .lowLightBoost:  return CaptureRecipe(frameCount: 12, durationSeconds: 1.0)
-        case .smoothMotion:   return CaptureRecipe(frameCount: 30, durationSeconds: 2.0)
-        case .lightTrails:    return CaptureRecipe(frameCount: 30, durationSeconds: 3.0)
+        // Long-exposure looks: 15 frames (not 30) — full-res align+stack of 30 frames peaked at ~3 GB
+        // and the OS jetsam-killed the app. 15 spread over the same window keeps the streak/blur at
+        // ~half the peak memory and CPU. (A streaming/incremental stack would lift this cap later.)
+        case .smoothMotion:   return CaptureRecipe(frameCount: 15, durationSeconds: 2.0)
+        case .lightTrails:    return CaptureRecipe(frameCount: 15, durationSeconds: 3.0)
         }
     }
 

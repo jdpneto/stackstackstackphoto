@@ -63,6 +63,14 @@ public enum Pipeline {
     static let trailsMotionLo: Float = 0.05
     static let trailsMotionHi: Float = 0.15
 
+    /// Diagnostic: the developed + working-resolution frames that `reduceImages` feeds to alignment.
+    /// Lets the app dump the exact alignment input for offline debugging of handheld registration.
+    public static func developedFrames(_ frames: [RawSensorFrame], binnedDevelop: Bool,
+                                       workingResolution: Int?) -> [PixelImage] {
+        let developed = parallelMap(frames) { binnedDevelop ? ColorPipeline.processBinned($0) : ColorPipeline.process($0) }
+        return downscale(developed, maxEdge: workingResolution)
+    }
+
     /// End-to-end from raw frames: develop each → (downscale) → align → reduce for the chosen look.
     /// `binnedDevelop` uses the fast half-resolution 2×2-bin develop (managed/on-device path); the
     /// full bilinear demosaic is the dominant develop cost otherwise.
