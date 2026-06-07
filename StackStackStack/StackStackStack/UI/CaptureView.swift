@@ -10,6 +10,14 @@ struct CaptureView: View {
     @State private var editSource: EditSource?
     @State private var showPro = false
     @State private var previewLayer: CALayer?
+    @State private var focusIndicator: FocusIndicator?
+    @State private var focusSquareScale: CGFloat = 1.0
+
+    private struct FocusIndicator: Identifiable, Equatable {
+        let id = UUID()
+        let point: CGPoint
+        let locked: Bool
+    }
 
     /// Everything the editor needs, loaded off the main thread before the sheet is presented.
     private struct EditSource: Identifiable {
@@ -22,9 +30,18 @@ struct CaptureView: View {
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            CameraPreviewView(previewLayer: previewLayer).ignoresSafeArea()   // live viewfinder (nil → black)
+            CameraPreviewView(
+                previewLayer: previewLayer,
+                enabled: coordinator.tapToFocusEnabled,
+                onFocus: { devicePoint, viewPoint, lock in
+                    coordinator.focusAndExpose(atDevicePoint: devicePoint, lock: lock)
+                    showFocusIndicator(at: viewPoint, locked: lock)
+                }
+            ).ignoresSafeArea()   // live viewfinder (nil → black)
             burstSliders
             steadinessOverlay
+            focusIndicatorOverlay
+            aeAfBanner
             VStack {
                 Spacer()
                 if let img = lastResult {
@@ -56,6 +73,11 @@ struct CaptureView: View {
         .onReceive(coordinator.$lastResultJPEG) { data in
             lastResult = data.flatMap { UIImage(data: $0) }
         }
+        // When the AE/AF lock is released (by a tap, a manual override, or a look change), drop the
+        // persistent lock square.
+        .onReceive(coordinator.$aeAfLocked) { locked in
+            if !locked, focusIndicator?.locked == true { focusIndicator = nil }
+        }
         .sheet(item: $editSource) { src in
             EditorView(originalJPEG: src.original, initialAdjustments: src.adjustments,
                        initialPreview: src.preview, recordId: src.id, store: coordinator.library) { renderedJPEG in
@@ -79,6 +101,54 @@ struct CaptureView: View {
             guard let (data, adj, prevData) = loaded else { return }
             editSource = EditSource(id: id, original: data, adjustments: adj,
                                     preview: prevData.flatMap { UIImage(data: $0) })
+        }
+    }
+
+    /// Show the focus square at the tap location: spring in, then auto-dismiss after ~1s unless it's a
+    /// lock (the lock square persists while `aeAfLocked`).
+    private func showFocusIndicator(at point: CGPoint, locked: Bool) {
+        let indicator = FocusIndicator(point: point, locked: locked)
+        focusIndicator = indicator
+        // Snap to oversized WITHOUT animation (a bare assignment can otherwise be swept into an
+        // in-flight spring on a rapid second tap), then spring down to 1.0.
+        var snap = Transaction(); snap.disablesAnimations = true
+        withTransaction(snap) { focusSquareScale = 1.3 }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { focusSquareScale = 1.0 }
+        guard !locked else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if focusIndicator?.id == indicator.id {
+                withAnimation(.easeOut(duration: 0.3)) { focusIndicator = nil }
+            }
+        }
+    }
+
+    /// iOS-style focus square at the last tap. Transient for a tap, persistent while AE/AF locked.
+    /// `.ignoresSafeArea()` matches the positioning origin to the preview's full-screen coordinate
+    /// space — the gesture reports `location(in:)` against the safe-area-ignoring preview host, so
+    /// without this the square would be offset by the safe-area (dynamic island) inset.
+    @ViewBuilder private var focusIndicatorOverlay: some View {
+        if let fi = focusIndicator {
+            Rectangle()
+                .stroke(Color.yellow, lineWidth: 1.5)
+                .frame(width: 80, height: 80)
+                .scaleEffect(focusSquareScale)
+                .position(fi.point)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("focus-indicator")
+        }
+    }
+
+    @ViewBuilder private var aeAfBanner: some View {
+        if coordinator.aeAfLocked {
+            Text("AE/AF LOCK")
+                .font(.caption).bold().foregroundColor(.black)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color.yellow).clipShape(RoundedRectangle(cornerRadius: 4))
+                .padding(.top, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("ae-af-lock-banner")
         }
     }
 

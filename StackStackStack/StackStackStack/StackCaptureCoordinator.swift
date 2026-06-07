@@ -18,13 +18,19 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published private(set) var lastSavedID: UUID?
     /// The most recent failure message (capture or processing); cleared when a new shot starts.
     @Published private(set) var lastError: String?
+    /// True while AF/AE are locked via a long-press on the preview (drives the "AE/AF LOCK" banner).
+    @Published private(set) var aeAfLocked = false
     /// The currently selected look. Settable from the capture UI. Switching looks drops the on-screen
     /// result (a new look implies a new shot), so the preview and "Saved ✓" don't go stale.
     @Published var mode: StackMode = .noiseReduction {
-        didSet { if mode != oldValue { lastResultJPEG = nil; lastSavedID = nil; lastError = nil } }
+        didSet { if mode != oldValue { lastResultJPEG = nil; lastSavedID = nil; lastError = nil; aeAfLocked = false } }
     }
     /// Manual Pro overrides (frame count / ISO / shutter / focus). Auto by default.
-    @Published var pro: ProControls = .auto
+    @Published var pro: ProControls = .auto {
+        // Tapping is disabled in manual mode (see `tapToFocusEnabled`); drop any AE/AF lock so the
+        // banner doesn't linger.
+        didSet { if pro != oldValue, pro.hasManualFocusOrExposure { aeAfLocked = false } }
+    }
     /// User burst length/window for the long-exposure looks (ignored by the static looks).
     @Published var burst: BurstSettings = .default
     /// Handheld-steadiness tracker for the long-exposure looks; observed by the capture overlay and
@@ -55,12 +61,25 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Start the live preview and return its layer (nil if unavailable, e.g. the Simulator fake).
     func startPreview() async -> CALayer? { await capture.startPreview() }
 
+    /// Tap-to-focus is available only in full-auto exposure/focus (no manual Pro override) and while
+    /// the shutter is free. (design tap-to-focus §3.3)
+    var tapToFocusEnabled: Bool { !pro.hasManualFocusOrExposure && !isBusy }
+
+    /// Focus + meter exposure at a normalized device point; `lock` (long-press) holds AF/AE and shows
+    /// the banner. (design tap-to-focus §3.3)
+    func focusAndExpose(atDevicePoint point: CGPoint, lock: Bool) {
+        guard tapToFocusEnabled else { return }   // ignore a stale gesture fired as a burst/manual mode began
+        capture.setFocusExposure(atDevicePoint: point, lock: lock)
+        aeAfLocked = lock
+    }
+
     /// Capture a burst (foreground, fast), then queue the heavy processing in the background.
     func shoot() async {
         guard !isBusy else { return }   // reject a rapid double-tap, and a shot during the background stack
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
+        aeAfLocked = false                   // a long-press lock is superseded once a shot begins
         isCapturing = true
         let gating: @Sendable () -> Bool
         if mode.isLongExposure {

@@ -312,6 +312,32 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
     }
 
+    /// Focus + meter exposure at `point` (normalized device coords). Tap → one-shot autofocus with
+    /// continuous exposure metering at the point; long-press (`lock`) → one-shot AF + AE that hold
+    /// (AE/AF lock). Runs on `sessionQueue`; every step capability-guarded. (design tap-to-focus §3.2)
+    func setFocusExposure(atDevicePoint point: CGPoint, lock: Bool) {
+        sessionQueue.async {
+            guard let dev = self.device else { return }   // session not yet configured → no-op until startPreview completes
+            do { try dev.lockForConfiguration() } catch { return }
+            if dev.isFocusPointOfInterestSupported {
+                dev.focusPointOfInterest = point
+                if dev.isFocusModeSupported(.autoFocus) { dev.focusMode = .autoFocus }   // one sweep, then holds
+            }
+            if dev.isExposurePointOfInterestSupported {
+                dev.exposurePointOfInterest = point
+                // Lock: meter once and hold (.autoExpose), else freeze (.locked). Tap: keep metering the
+                // subject (.continuousAutoExposure), else meter once (.autoExpose).
+                let primary: AVCaptureDevice.ExposureMode = lock ? .autoExpose : .continuousAutoExposure
+                let fallback: AVCaptureDevice.ExposureMode = lock ? .locked : .autoExpose
+                if dev.isExposureModeSupported(primary) { dev.exposureMode = primary }
+                else if dev.isExposureModeSupported(fallback) { dev.exposureMode = fallback }
+            }
+            // White balance is intentionally left as-is — it's locked per-burst by lockExposureAndFocus and
+            // re-locked at the next shoot; tap-to-focus only adjusts focus + exposure (design tap-to-focus §2).
+            dev.unlockForConfiguration()
+        }
+    }
+
     // MARK: - Completion (always on stateQueue)
 
     /// Resume the continuation exactly once and clear per-burst state. Must run on `stateQueue`.

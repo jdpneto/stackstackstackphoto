@@ -1,4 +1,5 @@
 import XCTest
+import CoreGraphics
 import StackEngineCore
 @testable import StackStackStack
 
@@ -107,5 +108,77 @@ final class CoordinatorTests: XCTestCase {
         coord.mode = .smoothMotion                  // switch looks → a new shot is implied
         XCTAssertNil(coord.lastResultJPEG, "switching looks should drop the stale result preview")
         XCTAssertNil(coord.lastSavedID)
+    }
+
+    @MainActor
+    func testTapToFocusEnabledInAutoModeAndFree() {
+        let (coord, _) = makeCoordinator()
+        XCTAssertTrue(coord.tapToFocusEnabled)
+    }
+
+    @MainActor
+    func testTapToFocusDisabledWithEachManualOverride() {
+        let (coord, _) = makeCoordinator()
+        coord.pro = ProControls(focus: 0.5)
+        XCTAssertFalse(coord.tapToFocusEnabled, "manual focus disables tap-to-focus")
+        coord.pro = ProControls(iso: 800)
+        XCTAssertFalse(coord.tapToFocusEnabled, "manual ISO disables tap-to-focus")
+        coord.pro = ProControls(shutterSeconds: 0.01)
+        XCTAssertFalse(coord.tapToFocusEnabled, "manual shutter disables tap-to-focus")
+        coord.pro = .auto
+        XCTAssertTrue(coord.tapToFocusEnabled, "back to auto re-enables")
+    }
+
+    @MainActor
+    func testFocusAndExposeTogglesAeAfLock() {
+        let (coord, _) = makeCoordinator()
+        coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
+        XCTAssertTrue(coord.aeAfLocked)
+        coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.3, y: 0.3), lock: false)
+        XCTAssertFalse(coord.aeAfLocked, "a normal tap clears the lock")
+    }
+
+    @MainActor
+    func testEnablingManualClearsAeAfLock() {
+        let (coord, _) = makeCoordinator()
+        coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
+        coord.pro = ProControls(iso: 800)
+        XCTAssertFalse(coord.aeAfLocked, "entering manual drops the AE/AF lock")
+    }
+
+    @MainActor
+    func testChangingLookClearsAeAfLock() {
+        let (coord, _) = makeCoordinator()
+        coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
+        coord.mode = .smoothMotion
+        XCTAssertFalse(coord.aeAfLocked, "switching looks drops the AE/AF lock")
+    }
+
+    @MainActor
+    func testFocusAndExposeIsNoOpWhenDisabled() {
+        let (coord, _) = makeCoordinator()
+        coord.pro = ProControls(iso: 800)   // manual exposure → tapToFocusEnabled == false
+        coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
+        XCTAssertFalse(coord.aeAfLocked, "a gesture while disabled (manual mode) must not set the AE/AF lock")
+    }
+
+    @MainActor
+    func testShootClearsAeAfLock() async throws {
+        let (coord, _) = makeCoordinator()
+        coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
+        XCTAssertTrue(coord.aeAfLocked)
+        await coord.shoot()                  // a new shot supersedes the long-press lock
+        XCTAssertFalse(coord.aeAfLocked, "shooting clears the AE/AF lock so the banner doesn't linger")
+        await coord.awaitProcessing()
+    }
+
+    @MainActor
+    func testTapToFocusDisabledWhileBusy() async throws {
+        let (coord, _) = makeCoordinator()
+        await coord.shoot()   // capture done; the stack is queued (processingCount > 0) but its Task hasn't
+                              // taken the MainActor yet, so isBusy is deterministically true here
+        XCTAssertFalse(coord.tapToFocusEnabled, "tap-to-focus is disabled while a stack is processing")
+        await coord.awaitProcessing()
+        XCTAssertTrue(coord.tapToFocusEnabled, "re-enabled once processing finishes")
     }
 }

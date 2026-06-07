@@ -61,6 +61,10 @@ protocol CaptureService {
     /// Start the live preview session and return a layer showing it (nil if unavailable, e.g. the
     /// Simulator fake). Idempotent — safe to call each time the capture screen appears.
     func startPreview() async -> CALayer?
+    /// Tap-to-focus: focus + meter exposure at a normalized device point of interest (0…1, from
+    /// `AVCaptureVideoPreviewLayer.captureDevicePointConverted`). `lock` (long-press) holds AF/AE.
+    /// Device-only; the default below makes it a no-op for callers without a camera. (design tap-to-focus §3.2)
+    func setFocusExposure(atDevicePoint point: CGPoint, lock: Bool)
 }
 
 extension CaptureService {
@@ -68,4 +72,6 @@ extension CaptureService {
     func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
         try await captureBurst(recipe: recipe, isSteady: { true })
     }
+
+    func setFocusExposure(atDevicePoint point: CGPoint, lock: Bool) { }   // no-op unless a device overrides it
 }
