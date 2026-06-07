@@ -66,4 +66,29 @@ final class PipelineStreamingTests: XCTestCase {
             XCTAssertEqual(streamed.pixels[i].x, imgs[0].pixels[i].x, accuracy: 1e-6)
         }
     }
+
+    private func grayRaw(_ value: UInt16, w: Int = 64, h: Int = 64) -> RawSensorFrame {
+        RawSensorFrame(width: w, height: h, mosaic: [UInt16](repeating: value, count: w * h),
+                       blackLevel: 64, whiteLevel: 1024, cfa: .rggb,
+                       wbGains: SIMD3<Float>(1, 1, 1))
+    }
+
+    func testReduceStreamingFromRawFramesProducesResult() throws {
+        let frames = (0..<5).map { grayRaw(UInt16(300 + $0 * 10)) }
+        let result = try Pipeline.reduceStreaming(frames, mode: .smoothMotion, workingResolution: 32)
+        XCTAssertGreaterThan(result.width, 0)
+        XCTAssertGreaterThan(result.height, 0)
+        XCTAssertEqual(result.pixels.count, result.width * result.height)
+    }
+
+    func testReduceStreamingHonorsCancellation() {
+        let frames = (0..<8).map { grayRaw(UInt16(300 + $0 * 10)) }
+        var calls = 0
+        XCTAssertThrowsError(
+            try Pipeline.reduceStreaming(frames, mode: .lightTrails, workingResolution: 32,
+                                         shouldCancel: { calls += 1; return calls > 1 })
+        ) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
 }

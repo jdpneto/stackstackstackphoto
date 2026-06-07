@@ -124,6 +124,35 @@ public enum Pipeline {
         return MotionComposite.blend(staticBase: base, effect: streaks, mask: mask)
     }
 
+    /// End-to-end streaming stack for the long-exposure looks. Develops each raw frame on demand,
+    /// downscales to `workingResolution`, aligns it to the FIRST frame (the anchor — streaming can't
+    /// hold all frames to pick the sharpest, and the steadiness gate keeps the burst near one pose),
+    /// and folds it via `streamingReduce`. Only one developed/aligned frame is live at a time.
+    /// (design 2026-06-07 §6)
+    public static func reduceStreaming(_ frames: [RawSensorFrame], mode: StackMode,
+                                       searchRange: Int = 8, workingResolution: Int? = nil,
+                                       binnedDevelop: Bool = true,
+                                       shouldCancel: () -> Bool = { false }) throws -> PixelImage {
+        precondition(!frames.isEmpty, "need at least one frame")
+        func develop(_ i: Int) -> PixelImage {
+            let d = binnedDevelop ? ColorPipeline.processBinned(frames[i]) : ColorPipeline.process(frames[i])
+            guard let maxEdge = workingResolution else { return d }
+            return downscaleOne(d, maxEdge: maxEdge)
+        }
+        let reference = develop(0)                                   // anchor, kept for the whole run
+        let refSmall = downscaleOne(reference, maxEdge: alignmentEstimateEdge)
+        let factor = Float(reference.width) / Float(refSmall.width)
+        return try streamingReduce(count: frames.count, mode: mode, shouldCancel: shouldCancel) { i in
+            if i == 0 { return reference }
+            let moving = develop(i)
+            let movSmall = downscaleOne(moving, maxEdge: alignmentEstimateEdge)
+            let ts = AffineAligner.estimate(reference: refSmall, moving: movSmall,
+                                            translationSearch: searchRange, robustClip: alignmentRobustClip)
+            let t = Transform2D(a: ts.a, b: ts.b, c: ts.c, d: ts.d, tx: ts.tx * factor, ty: ts.ty * factor)
+            return AffineAligner.warp(moving, by: t)
+        }
+    }
+
     /// Diagnostic: the developed + working-resolution frames that `reduceImages` feeds to alignment.
     /// Lets the app dump the exact alignment input for offline debugging of handheld registration.
     public static func developedFrames(_ frames: [RawSensorFrame], binnedDevelop: Bool,
