@@ -34,7 +34,10 @@ struct ZoomableScrollView: UIViewRepresentable {
             scroll.zoomScale = 1
         }
         // Resize to fill the scroll view only on a real bounds change (skip the zero-bounds first pass).
-        if !scroll.bounds.isEmpty, iv.frame.size != scroll.bounds.size {
+        // Guard on zoomScale == 1: while the user is zoomed in, UIScrollView reports iv.frame.size as
+        // bounds×scale, so without this an unrelated SwiftUI re-render (e.g. a toolbar tap flipping
+        // @State) would trip this branch and collapse the active zoom into an inconsistent layout.
+        if !scroll.bounds.isEmpty, scroll.zoomScale == 1, iv.frame.size != scroll.bounds.size {
             iv.frame = CGRect(origin: .zero, size: scroll.bounds.size)
             scroll.contentSize = scroll.bounds.size
             context.coordinator.centerContent(scroll)
