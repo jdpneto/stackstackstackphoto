@@ -54,8 +54,18 @@ struct CaptureRecipe: Sendable, Equatable {
 }
 
 protocol CaptureService {
-    func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame]
+    /// `isSteady` is consulted before each frame; when it returns false the burst waits rather than
+    /// capturing (steadiness gating, long-exposure looks). Callers that don't gate use the overload
+    /// below. (design 2026-06-07 §8)
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> [RawSensorFrame]
     /// Start the live preview session and return a layer showing it (nil if unavailable, e.g. the
     /// Simulator fake). Idempotent — safe to call each time the capture screen appears.
     func startPreview() async -> CALayer?
+}
+
+extension CaptureService {
+    /// Ungated capture (static looks, tests): always "steady".
+    func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
+        try await captureBurst(recipe: recipe, isSteady: { true })
+    }
 }
