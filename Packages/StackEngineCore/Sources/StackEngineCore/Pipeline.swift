@@ -63,6 +63,67 @@ public enum Pipeline {
     static let trailsMotionLo: Float = 0.05
     static let trailsMotionHi: Float = 0.15
 
+    /// Streaming/incremental reducer for the long-exposure looks: folds one frame at a time into
+    /// per-pixel accumulators and releases it, so peak memory is bounded by ~1-2 frames + a fixed
+    /// set of accumulator buffers regardless of frame count (vs. holding all developed + all aligned
+    /// frames). `aligned(i)` returns frame i ALREADY aligned to the anchor (frame 0); it is called in
+    /// order and the result folded immediately, so only one frame is live at a time. `shouldCancel`
+    /// is checked between frames; a true return throws `CancellationError` (no result). Only
+    /// smoothMotion / lightTrails are supported. (design 2026-06-07 §6)
+    static func streamingReduce(count n: Int, mode: StackMode,
+                                shouldCancel: () -> Bool = { false },
+                                aligned: (Int) -> PixelImage) throws -> PixelImage {
+        precondition(n >= 1, "need at least one frame")
+        precondition(mode == .smoothMotion || mode == .lightTrails,
+                     "streamingReduce supports the long-exposure looks only")
+        let first = aligned(0)
+        let w = first.width, h = first.height
+        let wantTrails = (mode == .lightTrails)
+
+        var sum = [SIMD3<Float>](repeating: .zero, count: w * h)        // running sum  → mean / base
+        var maxRGB = wantTrails ? first.pixels : [SIMD3<Float>]()        // running max  → lighten / streaks
+        var lumaMin = wantTrails ? [Float](repeating: .greatestFiniteMagnitude, count: w * h) : []
+        var lumaMax = wantTrails ? [Float](repeating: -.greatestFiniteMagnitude, count: w * h) : []
+        var count = 0
+
+        func fold(_ img: PixelImage) {
+            precondition(img.width == w && img.height == h, "all frames must be the same size")
+            for i in 0..<(w * h) {
+                let p = img.pixels[i]
+                sum[i] += p
+                if wantTrails {
+                    maxRGB[i] = simd_max(maxRGB[i], p)
+                    let l = 0.2126 * p.x + 0.7152 * p.y + 0.0722 * p.z
+                    lumaMin[i] = Swift.min(lumaMin[i], l)
+                    lumaMax[i] = Swift.max(lumaMax[i], l)
+                }
+            }
+            count += 1
+        }
+
+        fold(first)                                   // the anchor folds as itself
+        for i in 1..<n {
+            if shouldCancel() { throw CancellationError() }
+            fold(aligned(i))
+        }
+
+        let inv = 1 / Float(count)
+        var base = PixelImage(width: w, height: h)
+        for i in 0..<(w * h) { base.pixels[i] = sum[i] * inv }          // mean
+        if !wantTrails { return base }                                  // smoothMotion = mean
+
+        // lightTrails: streaks (running max), motion mask from the temporal luma range, composite.
+        let streaks = PixelImage(width: w, height: h, pixels: maxRGB)
+        let invSpan = 1 / Swift.max(trailsMotionHi - trailsMotionLo, 1e-6)
+        var mask = [Float](repeating: 0, count: w * h)
+        for i in 0..<(w * h) {
+            let c = Swift.min(Swift.max((lumaMax[i] - lumaMin[i] - trailsMotionLo) * invSpan, 0), 1)
+            mask[i] = c * c * (3 - 2 * c)                               // smoothstep
+        }
+        mask = BoxFilter.mean(mask, width: w, height: h, radius: 2)     // same smoothRadius as motionMask
+        return MotionComposite.blend(staticBase: base, effect: streaks, mask: mask)
+    }
+
     /// Diagnostic: the developed + working-resolution frames that `reduceImages` feeds to alignment.
     /// Lets the app dump the exact alignment input for offline debugging of handheld registration.
     public static func developedFrames(_ frames: [RawSensorFrame], binnedDevelop: Bool,
