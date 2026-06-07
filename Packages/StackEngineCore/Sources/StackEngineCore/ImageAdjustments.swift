@@ -22,10 +22,13 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
     public var highlights: Float        // -1...1, lift (+) / lower (-) bright tones
     public var straightenDegrees: Float // rotation about the centre, degrees
     public var cropAspect: CropAspect   // centre-crop aspect
+    public var quarterTurns: Int = 0 {  // 90°×k clockwise rotation, kept in 0…3 (gallery rotate)
+        didSet { quarterTurns = ((quarterTurns % 4) + 4) % 4 }   // stays canonical on direct mutation (e.g. += 1)
+    }
 
     public init(exposureEV: Float = 0, contrast: Float = 0, temperature: Float = 0, tint: Float = 0,
                 shadows: Float = 0, highlights: Float = 0, straightenDegrees: Float = 0,
-                cropAspect: CropAspect = .original) {
+                cropAspect: CropAspect = .original, quarterTurns: Int = 0) {
         self.exposureEV = exposureEV
         self.contrast = contrast
         self.temperature = temperature
@@ -34,6 +37,7 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
         self.highlights = highlights
         self.straightenDegrees = straightenDegrees
         self.cropAspect = cropAspect
+        self.quarterTurns = ((quarterTurns % 4) + 4) % 4
     }
 
     public static let identity = ImageAdjustments()
@@ -55,5 +59,7 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
         highlights = try c.decodeIfPresent(Float.self, forKey: .highlights) ?? 0
         straightenDegrees = try c.decodeIfPresent(Float.self, forKey: .straightenDegrees) ?? 0
         cropAspect = try c.decodeIfPresent(CropAspect.self, forKey: .cropAspect) ?? .original
+        let rawTurns = try c.decodeIfPresent(Int.self, forKey: .quarterTurns) ?? 0
+        quarterTurns = ((rawTurns % 4) + 4) % 4
     }
 }

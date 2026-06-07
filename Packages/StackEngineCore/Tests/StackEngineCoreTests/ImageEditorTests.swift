@@ -110,4 +110,15 @@ final class ImageEditorTests: XCTestCase {
         XCTAssertEqual(r.width, 16)
         XCTAssertEqual(r.height, 8)
     }
+
+    func testQuarterTurnRotatesViaImageGeometry() {
+        let img = PixelImage(width: 3, height: 2, pixels: (0..<6).map { SIMD3(Float($0), 0, 0) })
+        let adj = ImageAdjustments(quarterTurns: 1)
+        XCTAssertEqual(ImageEditor.apply(adj, to: img), ImageGeometry.rotated(img, quarterTurns: 1))
+    }
+
+    func testQuarterTurnMakesNonIdentity() {
+        XCTAssertFalse(ImageAdjustments(quarterTurns: 1).isIdentity)
+        XCTAssertTrue(ImageAdjustments(quarterTurns: 0).isIdentity)
+    }
 }
