@@ -66,6 +66,19 @@ final class CoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testCancelDiscardsQueuedStackAndFreesUI() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .smoothMotion
+        await coord.shoot()              // capture done on MainActor; processing Task scheduled, not yet run
+        coord.cancelProcessing()         // runs synchronously before the processing Task can take the actor
+        await coord.awaitProcessing()    // now it runs, sees the token cancelled, bails before saving
+        XCTAssertFalse(coord.isBusy, "shutter must be free after cancel")
+        XCTAssertNil(coord.lastSavedID)
+        XCTAssertNil(coord.lastError, "cancel is not an error")
+        XCTAssertEqual(try store.loadAll().count, 0, "a cancelled stack must not be saved")
+    }
+
+    @MainActor
     func testChangingLookDropsTheStaleResult() async throws {
         let (coord, _) = makeCoordinator()
         await coord.shoot()
