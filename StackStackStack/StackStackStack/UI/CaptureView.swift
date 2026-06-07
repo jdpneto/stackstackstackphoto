@@ -40,6 +40,7 @@ struct CaptureView: View {
                 }
             ).ignoresSafeArea()   // live viewfinder (nil → black)
             burstSliders
+            captureProgressOverlay
             steadinessOverlay
             focusIndicatorOverlay
             aeAfBanner
@@ -239,9 +240,10 @@ struct CaptureView: View {
     }
 
     /// Vertical Photos/Duration sliders pinned to the left/right edges, shown only for the
-    /// long-exposure looks. Each shows its value live as you drag. (design 2026-06-07 §5)
+    /// long-exposure looks (and hidden while capturing so the progress overlay has clear space).
+    /// Each shows its value live as you drag. (design 2026-06-07 §5)
     @ViewBuilder private var burstSliders: some View {
-        if coordinator.mode.isLongExposure {
+        if coordinator.mode.isLongExposure && !coordinator.isCapturing {
             HStack {
                 verticalBurstControl(
                     title: "Photos",
@@ -263,6 +265,29 @@ struct CaptureView: View {
             }
             .padding(.horizontal, 6)
             .disabled(coordinator.isBusy)
+        }
+    }
+
+    /// During a burst: photos-taken counter (left) and seconds-remaining countdown (right).
+    @ViewBuilder private var captureProgressOverlay: some View {
+        if coordinator.isCapturing {
+            HStack(alignment: .top) {
+                progressLabel("Photos", "\(coordinator.capturedCount)/\(coordinator.captureTotal)")
+                    .accessibilityIdentifier("capture-photo-count")
+                Spacer()
+                progressLabel("Time", "\(coordinator.captureRemainingSeconds)s")
+                    .accessibilityIdentifier("capture-time-remaining")
+            }
+            .padding(.horizontal, 16).padding(.top, 60)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func progressLabel(_ title: String, _ value: String) -> some View {
+        VStack(spacing: 2) {
+            Text(title).font(.caption2).foregroundColor(.white.opacity(0.8))
+            Text(value).font(.headline).bold().foregroundColor(.white)
         }
     }
 

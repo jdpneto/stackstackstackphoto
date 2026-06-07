@@ -193,4 +193,18 @@ final class CoordinatorTests: XCTestCase {
         await coord.awaitProcessing()
         XCTAssertTrue(coord.tapToFocusEnabled, "re-enabled once processing finishes")
     }
+
+    @MainActor
+    func testCapturePublishesProgress() async throws {
+        let (coord, _) = makeCoordinator()
+        coord.mode = .noiseReduction          // Detail: fixed 8-frame burst
+        await coord.shoot()                   // Fake fires onProgress per synthesized frame
+        // The Fake runs off the MainActor, so all 8 `Task { @MainActor in capturedCount = k }` hops are
+        // enqueued on the MainActor (FIFO) before shoot()'s continuation resumed the test — one yield puts
+        // the test behind them, so they're guaranteed to have run by the asserts (SE-0306 serial executor).
+        await Task.yield()
+        XCTAssertEqual(coord.captureTotal, 8, "total reflects the recipe frame count")
+        XCTAssertEqual(coord.capturedCount, 8, "counter reaches the captured frame count")
+        await coord.awaitProcessing()
+    }
 }

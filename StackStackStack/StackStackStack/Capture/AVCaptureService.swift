@@ -49,6 +49,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private var perFrameTimeout = 0.0           // watchdog horizon for a single capture
     private var totalFrames = 0                  // frames requested this burst (to detect the first frame)
     private var isSteadyCheck: () -> Bool = { true }   // steadiness gate; { true } = ungated
+    private var onProgress: (@Sendable (Int) -> Void)?  // per-frame progress callback; nil = none
     private var gateAttempts = 0                 // consecutive off-pose rechecks for the current frame
     private let gateRecheckInterval = 0.1        // seconds between steadiness rechecks
     private let maxStartGateAttempts = 50        // ~5s: wait for the first frame to be steady, then fire anyway
@@ -60,7 +61,8 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     // readout, never the 48 MP path, even if a device's default differs. (design 2026-06-07 §4)
     private var cappedPhotoDimensions: CMVideoDimensions?
 
-    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> [RawSensorFrame] {
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> [RawSensorFrame] {
         try await ensureAuthorized()
         try await ensureConfigured()
         try await lockExposureAndFocus(recipe: recipe)   // waits for manual exposure/focus to settle
@@ -94,6 +96,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 self.remaining = frameCount
                 self.totalFrames = frameCount
                 self.isSteadyCheck = isSteady
+                self.onProgress = onProgress
                 self.gateAttempts = 0
                 self.currentID = nil
                 self.rawType = rawType
@@ -346,6 +349,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         continuation = nil
         currentID = nil            // ignore any late stragglers / watchdog fires
         isSteadyCheck = { true }    // release any captured coordinator/MotionSteadiness reference
+        onProgress = nil            // release any captured coordinator reference
         let frames = pending
         pending = []
         if frames.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
@@ -369,6 +373,7 @@ extension AVCaptureService: AVCapturePhotoCaptureDelegate {
                 self.stateQueue.async {
                     guard self.continuation != nil, self.generation == gen else { return }   // burst ended/superseded
                     if let frame { self.pending.append(frame) }
+                    if frame != nil { self.onProgress?(self.pending.count) }
                     self.outstanding -= 1
                     self.maybeFinishLocked()
                 }

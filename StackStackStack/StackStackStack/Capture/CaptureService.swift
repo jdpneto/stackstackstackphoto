@@ -55,9 +55,11 @@ struct CaptureRecipe: Sendable, Equatable {
 
 protocol CaptureService {
     /// `isSteady` is consulted before each frame; when it returns false the burst waits rather than
-    /// capturing (steadiness gating, long-exposure looks). Callers that don't gate use the overload
+    /// capturing (steadiness gating, long-exposure looks). `onProgress` is called after each frame
+    /// is appended, with the running count (1…n). Callers that don't need these use the overloads
     /// below. (design 2026-06-07 §8)
-    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> [RawSensorFrame]
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> [RawSensorFrame]
     /// Start the live preview session and return a layer showing it (nil if unavailable, e.g. the
     /// Simulator fake). Idempotent — safe to call each time the capture screen appears.
     func startPreview() async -> CALayer?
@@ -68,9 +70,13 @@ protocol CaptureService {
 }
 
 extension CaptureService {
-    /// Ungated capture (static looks, tests): always "steady".
+    /// Ungated capture (static looks, tests): always "steady", no progress callback.
     func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
-        try await captureBurst(recipe: recipe, isSteady: { true })
+        try await captureBurst(recipe: recipe, isSteady: { true }, onProgress: nil)
+    }
+    /// Gated capture without a progress callback (long-exposure looks that don't need the counter).
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> [RawSensorFrame] {
+        try await captureBurst(recipe: recipe, isSteady: isSteady, onProgress: nil)
     }
 
     func setFocusExposure(atDevicePoint point: CGPoint, lock: Bool) { }   // no-op unless a device overrides it

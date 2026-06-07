@@ -21,6 +21,11 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published private(set) var lastError: String?
     /// True while AF/AE are locked via a long-press on the preview (drives the "AE/AF LOCK" banner).
     @Published private(set) var aeAfLocked = false
+    /// Live capture progress (drives the on-screen counter + countdown during the burst).
+    @Published private(set) var capturedCount = 0
+    @Published private(set) var captureTotal = 0
+    @Published private(set) var captureRemainingSeconds = 0
+    private var countdownTask: Task<Void, Never>?
     /// The currently selected look. Settable from the capture UI. Switching looks drops the on-screen
     /// result (a new look implies a new shot), so the preview and "Saved ✓" don't go stale.
     @Published var mode: StackMode = .noiseReduction {
@@ -83,7 +88,12 @@ final class StackCaptureCoordinator: ObservableObject {
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
         aeAfLocked = false                   // a long-press lock is superseded once a shot begins
+        let recipe = makeRecipe(for: mode)
         isCapturing = true
+        capturedCount = 0
+        captureTotal = recipe.frameCount
+        captureRemainingSeconds = Int(ceil(recipe.durationSeconds))
+        startCaptureCountdown()
         let gating: @Sendable () -> Bool
         if mode.isLongExposure {
             steadiness.start()
@@ -91,10 +101,17 @@ final class StackCaptureCoordinator: ObservableObject {
         } else {
             gating = { true }
         }
-        defer { if mode.isLongExposure { steadiness.stop() } }   // stops on every exit (success/throw/empty)
+        defer {
+            if mode.isLongExposure { steadiness.stop() }
+            countdownTask?.cancel(); countdownTask = nil
+            captureRemainingSeconds = 0   // don't leave a stale value between shots
+        }
+        let progress: @Sendable (Int) -> Void = { [weak self] n in
+            Task { @MainActor in self?.capturedCount = n }
+        }
         let frames: [RawSensorFrame]
         do {
-            frames = try await capture.captureBurst(recipe: makeRecipe(for: mode), isSteady: gating)
+            frames = try await capture.captureBurst(recipe: recipe, isSteady: gating, onProgress: progress)
         } catch {
             lastError = error.localizedDescription
             isCapturing = false
@@ -110,6 +127,18 @@ final class StackCaptureCoordinator: ObservableObject {
         lastResultJPEG = nil
         lastSavedID = nil
         lastError = nil          // symmetric with the look-change clear; no stale "Failed…" after dismiss
+    }
+
+    /// One-second ticks decrementing `captureRemainingSeconds` to 0 while the burst runs.
+    private func startCaptureCountdown() {
+        countdownTask?.cancel()
+        countdownTask = Task { [weak self] in
+            while !Task.isCancelled, let s = self?.captureRemainingSeconds, s > 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self else { break }
+                captureRemainingSeconds = max(0, captureRemainingSeconds - 1)
+            }
+        }
     }
 
     /// Build the capture recipe for `mode`. Long-exposure looks take their length/window from
