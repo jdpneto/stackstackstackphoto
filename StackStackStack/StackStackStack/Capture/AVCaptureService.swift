@@ -49,6 +49,10 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private var perFrameTimeout = 0.0           // watchdog horizon for a single capture
     // Touched only on sessionQueue.
     private var configured = false
+    // Computed once at configure (sessionQueue), read when building each capture's settings. The
+    // largest supported photo size not exceeding ~12 MP (4032x3024) — keeps RAW at the binned
+    // readout, never the 48 MP path, even if a device's default differs. (design 2026-06-07 §4)
+    private var cappedPhotoDimensions: CMVideoDimensions?
 
     func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
         try await ensureAuthorized()
@@ -112,6 +116,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 self.stateQueue.async { self.advanceLocked(completedID: id) }
                 return
             }
+            if let dims = self.cappedPhotoDimensions { settings.maxPhotoDimensions = dims }
             self.output.capturePhoto(with: settings, delegate: self)
         }
 
@@ -202,6 +207,17 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     // We develop the RAW ourselves, so the system's quality processing is wasted work —
                     // prioritize speed to minimize per-frame latency (the arms-up capture must be fast).
                     self.output.maxPhotoQualityPrioritization = .speed
+                    // Cap photo dimensions to ~12 MP. Pick the largest supported size within the
+                    // target; if every supported size is larger, fall back to the smallest (closest
+                    // to 12 MP) so we never silently capture a 48 MP RAW.
+                    let target = CMVideoDimensions(width: 4032, height: 3024)
+                    let supported = dev.activeFormat.supportedMaxPhotoDimensions
+                    let area: (CMVideoDimensions) -> Int = { Int($0.width) * Int($0.height) }
+                    self.cappedPhotoDimensions =
+                        supported.filter { $0.width <= target.width && $0.height <= target.height }
+                                 .max(by: { area($0) < area($1) })
+                        ?? supported.min(by: { area($0) < area($1) })
+                        ?? target
                     self.session.commitConfiguration()
                     self.session.startRunning()  // off the main thread (sessionQueue)
                     self.device = dev

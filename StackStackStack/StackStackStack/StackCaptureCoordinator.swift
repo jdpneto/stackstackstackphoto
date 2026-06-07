@@ -100,7 +100,7 @@ final class StackCaptureCoordinator: ObservableObject {
 
     /// DEBUG: dump the developed frames (the exact alignment input) for one capture so the handheld
     /// registration can be debugged offline on real data. Off for release; remove before merge.
-    nonisolated private static let dumpFramesForDiagnostics = true
+    nonisolated private static let dumpFramesForDiagnostics = false
 
     /// CPU-heavy develop → downscale → align → stack → encode, run off the MainActor.
     nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode) async throws -> Data {
