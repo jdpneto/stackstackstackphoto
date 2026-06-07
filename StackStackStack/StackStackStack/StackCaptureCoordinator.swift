@@ -69,16 +69,15 @@ final class StackCaptureCoordinator: ObservableObject {
         } else {
             gating = { true }
         }
+        defer { if mode.isLongExposure { steadiness.stop() } }   // stops on every exit (success/throw/empty)
         let frames: [RawSensorFrame]
         do {
             frames = try await capture.captureBurst(recipe: makeRecipe(for: mode), isSteady: gating)
         } catch {
-            if mode.isLongExposure { steadiness.stop() }
             lastError = error.localizedDescription
             isCapturing = false
             return
         }
-        if mode.isLongExposure { steadiness.stop() }
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
         guard !frames.isEmpty else { lastError = "No frames were captured."; return }
         enqueueProcessing(frames: frames, mode: mode)
@@ -167,7 +166,7 @@ final class StackCaptureCoordinator: ObservableObject {
                                                          workingResolution: managedWorkingResolution)
                 if shouldCancel() { throw CancellationError() }   // cancel between develop and reduce (static path)
                 if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
-                result = Pipeline.reduceImages(developed, mode: mode, workingResolution: managedWorkingResolution)
+                result = Pipeline.reduceImages(developed, mode: mode)   // already at working resolution
             }
             let rgba = OutputTransform.encodeSRGB8(result)
             return try ImageEncoder.encode(rgba8: rgba, width: result.width, height: result.height,

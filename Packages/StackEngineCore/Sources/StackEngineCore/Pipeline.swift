@@ -93,7 +93,7 @@ public enum Pipeline {
                 sum[i] += p
                 if wantTrails {
                     maxRGB[i] = simd_max(maxRGB[i], p)
-                    let l = 0.2126 * p.x + 0.7152 * p.y + 0.0722 * p.z
+                    let l = Luma.rec709(p)
                     lumaMin[i] = Swift.min(lumaMin[i], l)
                     lumaMax[i] = Swift.max(lumaMax[i], l)
                 }
@@ -134,6 +134,7 @@ public enum Pipeline {
                                        binnedDevelop: Bool = true,
                                        shouldCancel: () -> Bool = { false }) throws -> PixelImage {
         precondition(!frames.isEmpty, "need at least one frame")
+        if shouldCancel() { throw CancellationError() }
         precondition(mode.isLongExposure, "reduceStreaming supports long-exposure looks only (.smoothMotion / .lightTrails)")
         func develop(_ i: Int) -> PixelImage {
             let d = binnedDevelop ? ColorPipeline.processBinned(frames[i]) : ColorPipeline.process(frames[i])

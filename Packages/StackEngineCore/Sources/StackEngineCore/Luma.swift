@@ -1,9 +1,14 @@
 import simd
 
 public enum Luma {
+    /// Rec.709 luminance of a single linear-RGB pixel.
+    @inline(__always) public static func rec709(_ p: SIMD3<Float>) -> Float {
+        0.2126 * p.x + 0.7152 * p.y + 0.0722 * p.z
+    }
+
     /// Rec.709 luminance of each pixel.
     public static func luminance(_ img: PixelImage) -> [Float] {
-        img.pixels.map { 0.2126 * $0.x + 0.7152 * $0.y + 0.0722 * $0.z }
+        img.pixels.map { rec709($0) }
     }
 
     /// Sharpness = sum of |Laplacian| over the luminance image (higher = sharper).
