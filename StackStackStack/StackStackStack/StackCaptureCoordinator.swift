@@ -27,6 +27,9 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published var pro: ProControls = .auto
     /// User burst length/window for the long-exposure looks (ignored by the static looks).
     @Published var burst: BurstSettings = .default
+    /// Handheld-steadiness tracker for the long-exposure looks; observed by the capture overlay and
+    /// read by the capture gate. (design 2026-06-07 §8)
+    let steadiness = MotionSteadiness()
     /// Read-only access to the library for the editor.
     var library: LibraryStore { store }
 
@@ -59,14 +62,23 @@ final class StackCaptureCoordinator: ObservableObject {
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
         isCapturing = true
+        let gating: @Sendable () -> Bool
+        if mode.isLongExposure {
+            steadiness.start()
+            gating = { [steadiness] in steadiness.isSteady }
+        } else {
+            gating = { true }
+        }
         let frames: [RawSensorFrame]
         do {
-            frames = try await capture.captureBurst(recipe: makeRecipe(for: mode))
+            frames = try await capture.captureBurst(recipe: makeRecipe(for: mode), isSteady: gating)
         } catch {
+            if mode.isLongExposure { steadiness.stop() }
             lastError = error.localizedDescription
             isCapturing = false
             return
         }
+        if mode.isLongExposure { steadiness.stop() }
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
         guard !frames.isEmpty else { lastError = "No frames were captured."; return }
         enqueueProcessing(frames: frames, mode: mode)

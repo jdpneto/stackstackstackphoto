@@ -5,6 +5,7 @@ import StackEngineCore
 
 struct CaptureView: View {
     @ObservedObject var coordinator: StackCaptureCoordinator
+    @ObservedObject var steadiness: MotionSteadiness
     @State private var lastResult: UIImage?
     @State private var editSource: EditSource?
     @State private var showPro = false
@@ -23,6 +24,7 @@ struct CaptureView: View {
             Color.black.ignoresSafeArea()
             CameraPreviewView(previewLayer: previewLayer).ignoresSafeArea()   // live viewfinder (nil → black)
             burstSliders
+            steadinessOverlay
             VStack {
                 Spacer()
                 if let img = lastResult {
@@ -129,6 +131,27 @@ struct CaptureView: View {
             }
         }
         .padding(.bottom, 8)
+    }
+
+    /// Two-circle steadiness guide: a fixed big ring + a small circle that drifts with device tilt;
+    /// green inside tolerance, red outside. Shown only while a long-exposure burst is capturing.
+    @ViewBuilder private var steadinessOverlay: some View {
+        if coordinator.isCapturing && coordinator.mode.isLongExposure {
+            GeometryReader { geo in
+                let big: CGFloat = 120, small: CGFloat = 36
+                let maxShift = (big - small) / 2
+                let cx = geo.size.width / 2, cy = geo.size.height / 2
+                ZStack {
+                    Circle().stroke(Color.white.opacity(0.7), lineWidth: 3)
+                        .frame(width: big, height: big).position(x: cx, y: cy)
+                    Circle().fill(steadiness.isWithinTolerance ? Color.green : Color.red)
+                        .frame(width: small, height: small)
+                        .position(x: cx + steadiness.offset.x * maxShift,
+                                  y: cy + steadiness.offset.y * maxShift)
+                }
+            }
+            .allowsHitTesting(false)
+        }
     }
 
     /// Vertical Photos/Duration sliders pinned to the left/right edges, shown only for the
