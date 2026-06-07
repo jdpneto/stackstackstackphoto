@@ -30,7 +30,7 @@ struct PhotoDetailView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
                 if let image {
-                    Image(uiImage: image).resizable().scaledToFit()
+                    ZoomableScrollView(image: image).ignoresSafeArea()
                 } else if loaded {
                     VStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle")
