@@ -22,6 +22,7 @@ struct CaptureView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             CameraPreviewView(previewLayer: previewLayer).ignoresSafeArea()   // live viewfinder (nil → black)
+            burstSliders
             VStack {
                 Spacer()
                 if let img = lastResult {
@@ -130,6 +131,49 @@ struct CaptureView: View {
         .padding(.bottom, 8)
     }
 
+    /// Vertical Photos/Duration sliders pinned to the left/right edges, shown only for the
+    /// long-exposure looks. Each shows its value live as you drag. (design 2026-06-07 §5)
+    @ViewBuilder private var burstSliders: some View {
+        if coordinator.mode.isLongExposure {
+            HStack {
+                verticalBurstControl(
+                    title: "Photos",
+                    readout: "\(coordinator.burst.photoCount)",
+                    value: Binding(
+                        get: { Double(coordinator.burst.photoCount) },
+                        set: { coordinator.burst = BurstSettings(photoCount: Int($0.rounded()),
+                                                                 durationSeconds: coordinator.burst.durationSeconds) }),
+                    range: 2...20, step: 1)
+                Spacer()
+                verticalBurstControl(
+                    title: "Time",
+                    readout: "\(Int(coordinator.burst.durationSeconds))s",
+                    value: Binding(
+                        get: { coordinator.burst.durationSeconds },
+                        set: { coordinator.burst = BurstSettings(photoCount: coordinator.burst.photoCount,
+                                                                 durationSeconds: $0) }),
+                    range: 1...60, step: 1)
+            }
+            .padding(.horizontal, 6)
+            .disabled(coordinator.isBusy)
+        }
+    }
+
+    private func verticalBurstControl(title: String, readout: String, value: Binding<Double>,
+                                      range: ClosedRange<Double>, step: Double) -> some View {
+        VStack(spacing: 6) {
+            Text(title).font(.caption2).foregroundColor(.white)
+            Text(readout).font(.caption).bold().foregroundColor(.white)
+                .accessibilityIdentifier("burst-\(title.lowercased())-value")
+            Slider(value: value, in: range, step: step)
+                .rotationEffect(.degrees(-90))
+                .frame(width: 180)            // length of the slider track (becomes vertical extent)
+                .frame(width: 44, height: 180) // constrain the rotated footprint so layout reserves the right box
+                .tint(.white)
+                .accessibilityIdentifier("burst-\(title.lowercased())-slider")
+        }
+    }
+
     private var proPanel: some View {
         VStack(spacing: 8) {
             Button(showPro ? "Pro ▴" : "Pro ▾") { showPro.toggle() }
@@ -138,13 +182,15 @@ struct CaptureView: View {
                 .disabled(coordinator.isBusy)
             if showPro {
                 VStack(spacing: 10) {
-                    optControl("Frames", unit: "",
-                               binding: Binding(get: { coordinator.pro.frameCount.map(Double.init) },
-                                                set: { coordinator.pro.frameCount = $0.map { Int($0.rounded()) } }),
-                               range: 2...40, step: 1,
-                               // Default to the current look's burst length so enabling the control
-                               // doesn't silently change it; the user adjusts from there.
-                               defaultValue: Double(CaptureRecipe.recipe(for: coordinator.mode).frameCount)) { "\(Int($0))" }
+                    if !coordinator.mode.isLongExposure {
+                        optControl("Frames", unit: "",
+                                   binding: Binding(get: { coordinator.pro.frameCount.map(Double.init) },
+                                                    set: { coordinator.pro.frameCount = $0.map { Int($0.rounded()) } }),
+                                   range: 2...20, step: 1,
+                                   // Default to the current look's burst length so enabling the control
+                                   // doesn't silently change it; the user adjusts from there.
+                                   defaultValue: Double(CaptureRecipe.recipe(for: coordinator.mode).frameCount)) { "\(Int($0))" }
+                    }
                     optControl("ISO", unit: "",
                                binding: $coordinator.pro.iso, range: 50...3200, step: 10, defaultValue: 400) { "\(Int($0))" }
                     optControl("Shutter", unit: "s",
