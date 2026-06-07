@@ -6,8 +6,8 @@ import UIKit
 struct ZoomableScrollView: UIViewRepresentable {
     let image: UIImage
 
-    func makeUIView(context: Context) -> UIScrollView {
-        let scroll = UIScrollView()
+    func makeUIView(context: Context) -> CenteringScrollView {
+        let scroll = CenteringScrollView()
         scroll.delegate = context.coordinator
         scroll.minimumZoomScale = 1
         scroll.maximumZoomScale = 4
@@ -18,6 +18,7 @@ struct ZoomableScrollView: UIViewRepresentable {
         iv.contentMode = .scaleAspectFit
         iv.image = image
         scroll.addSubview(iv)
+        scroll.imageView = iv
         let doubleTap = UITapGestureRecognizer(target: context.coordinator,
                                                action: #selector(Coordinator.handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
@@ -25,39 +26,50 @@ struct ZoomableScrollView: UIViewRepresentable {
         return scroll
     }
 
-    func updateUIView(_ scroll: UIScrollView, context: Context) {
+    func updateUIView(_ scroll: CenteringScrollView, context: Context) {
         let iv = context.coordinator.imageView
-        // Only reset zoom when the image actually changes — otherwise an unrelated SwiftUI update
-        // (toolbar tap, sheet toggle) would snap the user out of a pinch.
+        // Only swap the image when it actually changes — otherwise an unrelated SwiftUI update
+        // (toolbar tap, sheet toggle) would snap the user out of a pinch. The new image is re-fit on
+        // the next layout pass (sizing lives in CenteringScrollView.layoutSubviews, not here).
         if iv.image !== image {
             iv.image = image
             scroll.zoomScale = 1
-        }
-        // Resize to fill the scroll view only on a real bounds change (skip the zero-bounds first pass).
-        // Guard on zoomScale == 1: while the user is zoomed in, UIScrollView reports iv.frame.size as
-        // bounds×scale, so without this an unrelated SwiftUI re-render (e.g. a toolbar tap flipping
-        // @State) would trip this branch and collapse the active zoom into an inconsistent layout.
-        if !scroll.bounds.isEmpty, scroll.zoomScale == 1, iv.frame.size != scroll.bounds.size {
-            iv.frame = CGRect(origin: .zero, size: scroll.bounds.size)
-            scroll.contentSize = scroll.bounds.size
-            context.coordinator.centerContent(scroll)
+            scroll.setNeedsLayout()
         }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
+    /// Sizes the image view to fill the scroll view in `layoutSubviews`. This must NOT live in
+    /// `updateUIView`: SwiftUI may call `updateUIView` before the scroll view has its final non-zero
+    /// bounds and does not call it again on layout, which would leave the image at zero size and the
+    /// viewer blank. `layoutSubviews` runs whenever UIKit lays the scroll view out (first appearance,
+    /// rotation, split-view), so the image is always sized once real bounds exist.
+    final class CenteringScrollView: UIScrollView {
+        weak var imageView: UIImageView?
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard let iv = imageView, !bounds.isEmpty else { return }
+            // Re-fit only when not zoomed: while zoomed in, UIScrollView reports the image view's frame
+            // as bounds×scale, so re-fitting here would collapse the active zoom.
+            if zoomScale == 1, iv.frame.size != bounds.size {
+                iv.frame = CGRect(origin: .zero, size: bounds.size)
+                contentSize = bounds.size
+            }
+            // Keep the content centred when it's smaller than the scroll view (zoomed back to fit, or a
+            // non-filling aspect ratio) so it doesn't pin to the top-left with black gutters.
+            let x = max((bounds.width - iv.frame.width) / 2, 0)
+            let y = max((bounds.height - iv.frame.height) / 2, 0)
+            let inset = UIEdgeInsets(top: y, left: x, bottom: y, right: x)
+            if contentInset != inset { contentInset = inset }   // avoid a redundant layout pass
+        }
+    }
+
     final class Coordinator: NSObject, UIScrollViewDelegate {
         let imageView = UIImageView()
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
-
-        /// Keep the image centred when it's smaller than the scroll view (e.g. zoomed back to fit, or a
-        /// non-filling aspect ratio) so it doesn't pin to the top-left with black gutters.
-        func centerContent(_ scroll: UIScrollView) {
-            let x = max((scroll.bounds.width - imageView.frame.width) / 2, 0)
-            let y = max((scroll.bounds.height - imageView.frame.height) / 2, 0)
-            scroll.contentInset = UIEdgeInsets(top: y, left: x, bottom: y, right: x)
-        }
-        func scrollViewDidZoom(_ scrollView: UIScrollView) { centerContent(scrollView) }
+        func scrollViewDidZoom(_ scrollView: UIScrollView) { scrollView.setNeedsLayout() }
 
         @objc func handleDoubleTap(_ g: UITapGestureRecognizer) {
             guard let scroll = g.view as? UIScrollView else { return }
