@@ -143,7 +143,7 @@ struct CaptureView: View {
                         get: { Double(coordinator.burst.photoCount) },
                         set: { coordinator.burst = BurstSettings(photoCount: Int($0.rounded()),
                                                                  durationSeconds: coordinator.burst.durationSeconds) }),
-                    range: 2...20, step: 1)
+                    range: 2...Double(CaptureRecipe.maxBurstFrames), step: 1)
                 Spacer()
                 verticalBurstControl(
                     title: "Time",
@@ -170,6 +170,8 @@ struct CaptureView: View {
                 .frame(width: 180)            // length of the slider track (becomes vertical extent)
                 .frame(width: 44, height: 180) // constrain the rotated footprint so layout reserves the right box
                 .tint(.white)
+                .accessibilityLabel(title)
+                .accessibilityValue(readout)
                 .accessibilityIdentifier("burst-\(title.lowercased())-slider")
         }
     }
@@ -186,7 +188,7 @@ struct CaptureView: View {
                         optControl("Frames", unit: "",
                                    binding: Binding(get: { coordinator.pro.frameCount.map(Double.init) },
                                                     set: { coordinator.pro.frameCount = $0.map { Int($0.rounded()) } }),
-                                   range: 2...20, step: 1,
+                                   range: 2...Double(CaptureRecipe.maxBurstFrames), step: 1,
                                    // Default to the current look's burst length so enabling the control
                                    // doesn't silently change it; the user adjusts from there.
                                    defaultValue: Double(CaptureRecipe.recipe(for: coordinator.mode).frameCount)) { "\(Int($0))" }

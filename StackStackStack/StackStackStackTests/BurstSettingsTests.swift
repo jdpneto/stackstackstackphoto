@@ -3,8 +3,10 @@ import XCTest
 
 final class BurstSettingsTests: XCTestCase {
     func testPhotoCountIsClampedToTwoThroughTwenty() {
-        XCTAssertEqual(BurstSettings(photoCount: 99, durationSeconds: 5).photoCount, 20)
+        XCTAssertEqual(BurstSettings(photoCount: 99, durationSeconds: 5).photoCount, CaptureRecipe.maxBurstFrames)
         XCTAssertEqual(BurstSettings(photoCount: 0, durationSeconds: 5).photoCount, 2)
+        XCTAssertEqual(BurstSettings(photoCount: 2, durationSeconds: 5).photoCount, 2)                       // lower boundary inclusive
+        XCTAssertEqual(BurstSettings(photoCount: CaptureRecipe.maxBurstFrames, durationSeconds: 5).photoCount, CaptureRecipe.maxBurstFrames) // upper boundary inclusive
         XCTAssertEqual(BurstSettings(photoCount: 10, durationSeconds: 5).photoCount, 10)
     }
 

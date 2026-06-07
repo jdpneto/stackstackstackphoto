@@ -56,7 +56,6 @@ final class StackCaptureCoordinator: ObservableObject {
     func shoot() async {
         guard !isBusy else { return }   // reject a rapid double-tap, and a shot during the background stack
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
-        let pro = self.pro
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
         isCapturing = true
@@ -75,7 +74,9 @@ final class StackCaptureCoordinator: ObservableObject {
 
     /// Build the capture recipe for `mode`. Long-exposure looks take their length/window from
     /// `burst` (the edge sliders) plus any manual Pro exposure overrides; static looks use the fixed
-    /// per-look recipe with the full Pro overrides. (design 2026-06-07 §5)
+    /// per-look recipe with the full Pro overrides. Called synchronously from `shoot()` before any
+    /// `await`, so `self.pro`/`self.burst` reflect their shutter-press values without a local snapshot.
+    /// (design 2026-06-07 §5)
     private func makeRecipe(for mode: StackMode) -> CaptureRecipe {
         if mode.isLongExposure {
             return CaptureRecipe(frameCount: burst.photoCount,
