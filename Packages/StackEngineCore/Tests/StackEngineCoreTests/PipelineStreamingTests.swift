@@ -62,9 +62,10 @@ final class PipelineStreamingTests: XCTestCase {
     func testStreamingSingleFrameReturnsThatFrame() throws {
         let imgs = movingSpotFrames(1)
         let streamed = try Pipeline.streamingReduce(count: 1, mode: .smoothMotion) { imgs[$0] }
-        for i in 0..<imgs[0].pixels.count {
-            XCTAssertEqual(streamed.pixels[i].x, imgs[0].pixels[i].x, accuracy: 1e-6)
-        }
+        XCTAssertEqual(streamed.pixels, imgs[0].pixels)
+        // lightTrails on a single frame: zero temporal range → mask 0 → returns frame 0 unchanged.
+        let trailed = try Pipeline.streamingReduce(count: 1, mode: .lightTrails) { imgs[$0] }
+        XCTAssertEqual(trailed.pixels, imgs[0].pixels)
     }
 
     private func grayRaw(_ value: UInt16, w: Int = 64, h: Int = 64) -> RawSensorFrame {

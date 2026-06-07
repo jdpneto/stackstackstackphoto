@@ -81,7 +81,7 @@ public enum Pipeline {
         let wantTrails = (mode == .lightTrails)
 
         var sum = [SIMD3<Float>](repeating: .zero, count: w * h)        // running sum  → mean / base
-        var maxRGB = wantTrails ? first.pixels : [SIMD3<Float>]()        // running max  → lighten / streaks
+        var maxRGB = wantTrails ? [SIMD3<Float>](repeating: SIMD3<Float>(repeating: -.greatestFiniteMagnitude), count: w * h) : []  // running max → lighten / streaks
         var lumaMin = wantTrails ? [Float](repeating: .greatestFiniteMagnitude, count: w * h) : []
         var lumaMax = wantTrails ? [Float](repeating: -.greatestFiniteMagnitude, count: w * h) : []
         var count = 0
@@ -134,6 +134,7 @@ public enum Pipeline {
                                        binnedDevelop: Bool = true,
                                        shouldCancel: () -> Bool = { false }) throws -> PixelImage {
         precondition(!frames.isEmpty, "need at least one frame")
+        precondition(mode.isLongExposure, "reduceStreaming supports long-exposure looks only (.smoothMotion / .lightTrails)")
         func develop(_ i: Int) -> PixelImage {
             let d = binnedDevelop ? ColorPipeline.processBinned(frames[i]) : ColorPipeline.process(frames[i])
             guard let maxEdge = workingResolution else { return d }
