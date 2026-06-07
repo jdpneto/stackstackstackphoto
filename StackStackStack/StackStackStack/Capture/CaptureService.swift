@@ -11,6 +11,10 @@ struct CaptureRecipe: Sendable, Equatable {
     var manualShutterSeconds: Double? // nil = auto/locked exposure duration (device path)
     var manualFocus: Float?           // nil = auto/locked focus; else lens position 0…1 (device path)
 
+    /// Hard ceiling on burst length. The on-device develop+stack memory/time envelope is sized for
+    /// this; beyond it the app risks the ~3 GB jetsam kill. (design 2026-06-07 §2)
+    static let maxBurstFrames = 20
+
     init(frameCount: Int, durationSeconds: Double,
          manualISO: Float? = nil, manualShutterSeconds: Double? = nil, manualFocus: Float? = nil) {
         precondition(frameCount > 0, "frameCount must be > 0")
@@ -41,7 +45,7 @@ struct CaptureRecipe: Sendable, Equatable {
     /// Merge manual Pro overrides onto a per-look recipe. Auto (nil) fields leave the look default;
     /// the frame-count override is clamped to ≥ 1 so the recipe stays valid.
     func applying(_ pro: ProControls) -> CaptureRecipe {
-        CaptureRecipe(frameCount: max(1, pro.frameCount ?? frameCount),
+        CaptureRecipe(frameCount: min(Self.maxBurstFrames, max(1, pro.frameCount ?? frameCount)),
                       durationSeconds: durationSeconds,
                       manualISO: pro.iso.map(Float.init) ?? manualISO,
                       manualShutterSeconds: pro.shutterSeconds ?? manualShutterSeconds,
