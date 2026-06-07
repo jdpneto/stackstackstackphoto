@@ -62,7 +62,9 @@ struct ZoomableScrollView: UIViewRepresentable {
             let x = max((bounds.width - iv.frame.width) / 2, 0)
             let y = max((bounds.height - iv.frame.height) / 2, 0)
             let inset = UIEdgeInsets(top: y, left: x, bottom: y, right: x)
-            if contentInset != inset { contentInset = inset }   // avoid a redundant layout pass
+            // Load-bearing guard, not just an optimization: assigning contentInset re-triggers
+            // layoutSubviews, so an unconditional set would loop. Only assign on a real change.
+            if contentInset != inset { contentInset = inset }
         }
     }
 
