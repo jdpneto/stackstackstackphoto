@@ -8,4 +8,13 @@ public enum StackMode: String, Sendable, Equatable, Hashable, CaseIterable {
     case smoothMotion     // plain temporal mean — silky water / clouds
     case lightTrails      // per-channel lighten (max) — light streaks
     case lowLightBoost    // robust mean + exposure gain — brighter night shot
+
+    /// The looks that capture a continuous burst over a window and use the streaming reducer
+    /// (vs. the static fast-burst looks). (design 2026-06-07 §3)
+    public var isLongExposure: Bool {
+        switch self {
+        case .smoothMotion, .lightTrails: return true
+        case .noiseReduction, .lowLightBoost: return false
+        }
+    }
 }

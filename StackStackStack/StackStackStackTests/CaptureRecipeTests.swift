@@ -41,4 +41,16 @@ final class CaptureRecipeTests: XCTestCase {
         let r = CaptureRecipe.recipe(for: .noiseReduction).applying(ProControls(frameCount: 0))
         XCTAssertEqual(r.frameCount, 1)
     }
+
+    func testProFrameCountIsCappedAt20() {
+        let recipe = CaptureRecipe(frameCount: 8, durationSeconds: 0.5)
+            .applying(ProControls(frameCount: 40))
+        XCTAssertEqual(recipe.frameCount, 20, "burst frame count must be hard-capped at 20")
+    }
+
+    func testProFrameCountFloorIsRespected() {
+        let recipe = CaptureRecipe(frameCount: 8, durationSeconds: 0.5)
+            .applying(ProControls(frameCount: 0))
+        XCTAssertEqual(recipe.frameCount, 1, "frame count must stay >= 1")
+    }
 }

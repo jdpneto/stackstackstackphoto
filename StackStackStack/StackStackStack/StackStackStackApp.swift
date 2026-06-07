@@ -9,7 +9,7 @@ struct StackStackStackApp: App {
     var body: some Scene {
         WindowGroup {
             TabView {
-                NavigationStack { CaptureView(coordinator: coordinator) }
+                NavigationStack { CaptureView(coordinator: coordinator, steadiness: coordinator.steadiness) }
                     .tabItem { Label("Capture", systemImage: "camera") }
                 NavigationStack { GalleryView() }
                     .tabItem { Label("Gallery", systemImage: "photo.on.rectangle") }

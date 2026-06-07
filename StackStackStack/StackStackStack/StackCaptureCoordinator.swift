@@ -25,6 +25,11 @@ final class StackCaptureCoordinator: ObservableObject {
     }
     /// Manual Pro overrides (frame count / ISO / shutter / focus). Auto by default.
     @Published var pro: ProControls = .auto
+    /// User burst length/window for the long-exposure looks (ignored by the static looks).
+    @Published var burst: BurstSettings = .default
+    /// Handheld-steadiness tracker for the long-exposure looks; observed by the capture overlay and
+    /// read by the capture gate. (design 2026-06-07 §8)
+    let steadiness = MotionSteadiness()
     /// Read-only access to the library for the editor.
     var library: LibraryStore { store }
 
@@ -33,6 +38,8 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Tail of the serial background-processing chain; each job awaits the previous so stacks run one
     /// at a time (they already use every core), bounding CPU and memory while the shutter stays free.
     private var processingTail: Task<Void, Never>?
+    /// Live cancellation tokens for queued/in-flight stacks; cancelled together by `cancelProcessing`.
+    private var activeTokens: [CancellationToken] = []
 
     init(capture: CaptureService, store: LibraryStore = LibraryStore()) {
         self.capture = capture
@@ -52,13 +59,20 @@ final class StackCaptureCoordinator: ObservableObject {
     func shoot() async {
         guard !isBusy else { return }   // reject a rapid double-tap, and a shot during the background stack
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
-        let pro = self.pro
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
         isCapturing = true
+        let gating: @Sendable () -> Bool
+        if mode.isLongExposure {
+            steadiness.start()
+            gating = { [steadiness] in steadiness.isSteady }
+        } else {
+            gating = { true }
+        }
+        defer { if mode.isLongExposure { steadiness.stop() } }   // stops on every exit (success/throw/empty)
         let frames: [RawSensorFrame]
         do {
-            frames = try await capture.captureBurst(recipe: .recipe(for: mode).applying(pro))
+            frames = try await capture.captureBurst(recipe: makeRecipe(for: mode), isSteady: gating)
         } catch {
             lastError = error.localizedDescription
             isCapturing = false
@@ -69,20 +83,46 @@ final class StackCaptureCoordinator: ObservableObject {
         enqueueProcessing(frames: frames, mode: mode)
     }
 
+    /// Build the capture recipe for `mode`. Long-exposure looks take their length/window from
+    /// `burst` (the edge sliders) plus any manual Pro exposure overrides; static looks use the fixed
+    /// per-look recipe with the full Pro overrides. Called synchronously from `shoot()` before any
+    /// `await`, so `self.pro`/`self.burst` reflect their shutter-press values without a local snapshot.
+    /// (design 2026-06-07 §5)
+    private func makeRecipe(for mode: StackMode) -> CaptureRecipe {
+        if mode.isLongExposure {
+            return CaptureRecipe(frameCount: burst.photoCount,
+                                 durationSeconds: burst.durationSeconds,
+                                 manualISO: pro.iso.map(Float.init),
+                                 manualShutterSeconds: pro.shutterSeconds,
+                                 manualFocus: pro.focus.map(Float.init))
+        }
+        return CaptureRecipe.recipe(for: mode).applying(pro)
+    }
+
     /// Queue develop→align→stack→encode→save behind any earlier job (serial), running the heavy work
     /// off the MainActor, then publish the result. The shutter stays free meanwhile.
     private func enqueueProcessing(frames: [RawSensorFrame], mode: StackMode) {
         processingCount += 1
+        let token = CancellationToken()
+        activeTokens.append(token)
         let previous = processingTail
         processingTail = Task { [weak self] in
             await previous?.value                                   // serialize behind earlier jobs
             guard let self else { return }
-            defer { self.processingCount -= 1 }                     // always settle the count
+            defer {
+                self.processingCount -= 1
+                self.activeTokens.removeAll { $0 === token }
+            }
+            if token.isCancelled { return }                        // cancelled while queued
             do {
-                let jpeg = try await Self.makeJPEG(from: frames, mode: mode)   // heavy work, off the MainActor
+                let jpeg = try await Self.makeJPEG(from: frames, mode: mode,
+                                                   shouldCancel: { token.isCancelled })
+                if token.isCancelled { return }                    // cancelled during processing → discard
                 let saved = try self.store.save(resultJPEG: jpeg, mode: mode.rawValue, frameCount: frames.count)
                 self.lastResultJPEG = jpeg
                 self.lastSavedID = saved.id
+            } catch is CancellationError {
+                return                                             // discarded mid-stack — not an error
             } catch {
                 self.lastError = error.localizedDescription
             }
@@ -92,6 +132,15 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Await all queued/in-flight background processing (tests; also "wait for everything to settle").
     func awaitProcessing() async { await processingTail?.value }
 
+    /// Cancel every queued/in-flight background stack. The per-job token (NOT Task cancellation — the
+    /// heavy work runs in `Task.detached`, which doesn't inherit it) makes each job discard its partial
+    /// work without saving (no error surfaced) and settle its `processingCount` via `defer`, freeing the
+    /// shutter. (design 2026-06-07 §7)
+    func cancelProcessing() {
+        for token in activeTokens { token.cancel() }
+        activeTokens.removeAll()
+    }
+
     /// Managed working resolution (long-edge px) the stack is processed at. Full-sensor RAW (~12 MP)
     /// × N frames through a CPU align+stack is minutes-slow on device; downscaling the developed
     /// frames to this before align/stack is the dominant speed + memory win (results stay sharp at
@@ -100,16 +149,25 @@ final class StackCaptureCoordinator: ObservableObject {
 
     /// DEBUG: dump the developed frames (the exact alignment input) for one capture so the handheld
     /// registration can be debugged offline on real data. Off for release; remove before merge.
-    nonisolated private static let dumpFramesForDiagnostics = true
+    nonisolated private static let dumpFramesForDiagnostics = false
 
     /// CPU-heavy develop → downscale → align → stack → encode, run off the MainActor.
-    nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode) async throws -> Data {
+    nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode,
+                                             shouldCancel: @escaping @Sendable () -> Bool) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
-            // Develop+downscale once, optionally dump for diagnostics, then align+reduce on the result.
-            let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
-                                                     workingResolution: managedWorkingResolution)
-            if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
-            let result = Pipeline.reduceImages(developed, mode: mode, workingResolution: managedWorkingResolution)
+            let result: PixelImage
+            if mode.isLongExposure {
+                // Streaming: one developed+aligned frame in flight at a time; cancellable between frames.
+                result = try Pipeline.reduceStreaming(frames, mode: mode,
+                                                      workingResolution: managedWorkingResolution,
+                                                      binnedDevelop: true, shouldCancel: shouldCancel)
+            } else {
+                let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
+                                                         workingResolution: managedWorkingResolution)
+                if shouldCancel() { throw CancellationError() }   // cancel between develop and reduce (static path)
+                if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
+                result = Pipeline.reduceImages(developed, mode: mode)   // already at working resolution
+            }
             let rgba = OutputTransform.encodeSRGB8(result)
             return try ImageEncoder.encode(rgba8: rgba, width: result.width, height: result.height,
                                            format: .jpeg, quality: 0.95)

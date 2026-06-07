@@ -47,10 +47,20 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private var rawType: OSType = 0             // Bayer RAW format used to build each frame's settings
     private var pacingInterval = 0.0            // delay between consecutive captures (see captureBurst)
     private var perFrameTimeout = 0.0           // watchdog horizon for a single capture
+    private var totalFrames = 0                  // frames requested this burst (to detect the first frame)
+    private var isSteadyCheck: () -> Bool = { true }   // steadiness gate; { true } = ungated
+    private var gateAttempts = 0                 // consecutive off-pose rechecks for the current frame
+    private let gateRecheckInterval = 0.1        // seconds between steadiness rechecks
+    private let maxStartGateAttempts = 50        // ~5s: wait for the first frame to be steady, then fire anyway
+    private let maxFrameGateAttempts = 30        // ~3s: if a later frame can't get steady, end the burst
     // Touched only on sessionQueue.
     private var configured = false
+    // Computed once at configure (sessionQueue), read when building each capture's settings. The
+    // largest supported photo size not exceeding ~12 MP (4032x3024) — keeps RAW at the binned
+    // readout, never the 48 MP path, even if a device's default differs. (design 2026-06-07 §4)
+    private var cappedPhotoDimensions: CMVideoDimensions?
 
-    func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> [RawSensorFrame] {
         try await ensureAuthorized()
         try await ensureConfigured()
         try await lockExposureAndFocus(recipe: recipe)   // waits for manual exposure/focus to settle
@@ -82,6 +92,9 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 self.outstanding = 0
                 self.continuation = cont
                 self.remaining = frameCount
+                self.totalFrames = frameCount
+                self.isSteadyCheck = isSteady
+                self.gateAttempts = 0
                 self.currentID = nil
                 self.rawType = rawType
                 self.pacingInterval = pacing
@@ -99,6 +112,27 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         guard self.generation == gen, self.continuation != nil else { return }
         guard self.remaining > 0 else { self.maybeFinishLocked(); return }
 
+        // Steadiness gate (long-exposure looks): don't consume a frame while off-pose.
+        if !self.isSteadyCheck() {
+            self.gateAttempts += 1
+            let isFirst = (self.remaining == self.totalFrames)
+            let maxAttempts = isFirst ? self.maxStartGateAttempts : self.maxFrameGateAttempts
+            if self.gateAttempts <= maxAttempts {
+                self.stateQueue.asyncAfter(deadline: .now() + self.gateRecheckInterval) {
+                    self.startNextFrameLocked(gen: gen)        // recheck; don't advance
+                }
+                return
+            }
+            if !isFirst {
+                // Later frame never steadied within the window → stop requesting frames, stack what we have.
+                self.remaining = 0
+                self.maybeFinishLocked()
+                return
+            }
+            // First frame timed out → fall through and capture anyway so the shot always yields ≥1 frame.
+        }
+        self.gateAttempts = 0   // reset for the next frame
+
         let settings = AVCapturePhotoSettings(rawPixelFormatType: self.rawType)
         settings.photoQualityPrioritization = .speed   // minimize per-frame capture latency
         let id = settings.uniqueID
@@ -112,6 +146,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 self.stateQueue.async { self.advanceLocked(completedID: id) }
                 return
             }
+            if let dims = self.cappedPhotoDimensions { settings.maxPhotoDimensions = dims }
             self.output.capturePhoto(with: settings, delegate: self)
         }
 
@@ -202,6 +237,17 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     // We develop the RAW ourselves, so the system's quality processing is wasted work —
                     // prioritize speed to minimize per-frame latency (the arms-up capture must be fast).
                     self.output.maxPhotoQualityPrioritization = .speed
+                    // Cap photo dimensions to ~12 MP. Pick the largest supported size within the
+                    // target; if every supported size is larger, fall back to the smallest (closest
+                    // to 12 MP) so we never silently capture a 48 MP RAW.
+                    let target = CMVideoDimensions(width: 4032, height: 3024)
+                    let supported = dev.activeFormat.supportedMaxPhotoDimensions
+                    let area: (CMVideoDimensions) -> Int = { Int($0.width) * Int($0.height) }
+                    self.cappedPhotoDimensions =
+                        supported.filter { $0.width <= target.width && $0.height <= target.height }
+                                 .max(by: { area($0) < area($1) })
+                        ?? supported.min(by: { area($0) < area($1) })
+                        ?? target
                     self.session.commitConfiguration()
                     self.session.startRunning()  // off the main thread (sessionQueue)
                     self.device = dev
@@ -273,6 +319,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         guard let cont = continuation else { return }
         continuation = nil
         currentID = nil            // ignore any late stragglers / watchdog fires
+        isSteadyCheck = { true }    // release any captured coordinator/MotionSteadiness reference
         let frames = pending
         pending = []
         if frames.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }

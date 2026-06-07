@@ -11,6 +11,10 @@ struct CaptureRecipe: Sendable, Equatable {
     var manualShutterSeconds: Double? // nil = auto/locked exposure duration (device path)
     var manualFocus: Float?           // nil = auto/locked focus; else lens position 0…1 (device path)
 
+    /// Hard ceiling on burst length. The on-device develop+stack memory/time envelope is sized for
+    /// this; beyond it the app risks the ~3 GB jetsam kill. (design 2026-06-07 §2)
+    static let maxBurstFrames = 20
+
     init(frameCount: Int, durationSeconds: Double,
          manualISO: Float? = nil, manualShutterSeconds: Double? = nil, manualFocus: Float? = nil) {
         precondition(frameCount > 0, "frameCount must be > 0")
@@ -41,7 +45,7 @@ struct CaptureRecipe: Sendable, Equatable {
     /// Merge manual Pro overrides onto a per-look recipe. Auto (nil) fields leave the look default;
     /// the frame-count override is clamped to ≥ 1 so the recipe stays valid.
     func applying(_ pro: ProControls) -> CaptureRecipe {
-        CaptureRecipe(frameCount: max(1, pro.frameCount ?? frameCount),
+        CaptureRecipe(frameCount: min(Self.maxBurstFrames, max(1, pro.frameCount ?? frameCount)),
                       durationSeconds: durationSeconds,
                       manualISO: pro.iso.map(Float.init) ?? manualISO,
                       manualShutterSeconds: pro.shutterSeconds ?? manualShutterSeconds,
@@ -50,8 +54,18 @@ struct CaptureRecipe: Sendable, Equatable {
 }
 
 protocol CaptureService {
-    func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame]
+    /// `isSteady` is consulted before each frame; when it returns false the burst waits rather than
+    /// capturing (steadiness gating, long-exposure looks). Callers that don't gate use the overload
+    /// below. (design 2026-06-07 §8)
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> [RawSensorFrame]
     /// Start the live preview session and return a layer showing it (nil if unavailable, e.g. the
     /// Simulator fake). Idempotent — safe to call each time the capture screen appears.
     func startPreview() async -> CALayer?
+}
+
+extension CaptureService {
+    /// Ungated capture (static looks, tests): always "steady".
+    func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
+        try await captureBurst(recipe: recipe, isSteady: { true })
+    }
 }
