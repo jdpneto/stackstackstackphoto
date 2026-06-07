@@ -12,6 +12,7 @@ struct CaptureView: View {
     @State private var previewLayer: CALayer?
     @State private var focusIndicator: FocusIndicator?
     @State private var focusSquareScale: CGFloat = 1.0
+    @State private var orientationActive = false   // balances begin/end device-orientation notifications
 
     private struct FocusIndicator: Identifiable, Equatable {
         let id = UUID()
@@ -69,6 +70,13 @@ struct CaptureView: View {
         }
         // Start the live preview when the capture screen appears (no-op on the Simulator fake).
         .task { if previewLayer == nil { previewLayer = await coordinator.startPreview() } }
+        // begin/end is ref-counted; guard so a re-appear (e.g. tab switch) can't leave it unbalanced.
+        .onAppear {
+            if !orientationActive { UIDevice.current.beginGeneratingDeviceOrientationNotifications(); orientationActive = true }
+        }
+        .onDisappear {
+            if orientationActive { UIDevice.current.endGeneratingDeviceOrientationNotifications(); orientationActive = false }
+        }
         // Decode the finished JPEG once, from the coordinator's published result — no disk read.
         .onReceive(coordinator.$lastResultJPEG) { data in
             lastResult = data.flatMap { UIImage(data: $0) }
