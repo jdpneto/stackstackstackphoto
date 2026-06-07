@@ -79,6 +79,26 @@ final class CoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testLongExposureUsesBurstSettingsFrameCount() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .smoothMotion
+        coord.burst = BurstSettings(photoCount: 7, durationSeconds: 4)
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertEqual(try store.loadAll().first?.frameCount, 7)
+    }
+
+    @MainActor
+    func testStaticLookIgnoresBurstSettings() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .noiseReduction                       // Detail: fixed 8-frame burst
+        coord.burst = BurstSettings(photoCount: 3, durationSeconds: 4)
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertEqual(try store.loadAll().first?.frameCount, 8)
+    }
+
+    @MainActor
     func testChangingLookDropsTheStaleResult() async throws {
         let (coord, _) = makeCoordinator()
         await coord.shoot()

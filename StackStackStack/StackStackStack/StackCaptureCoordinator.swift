@@ -25,6 +25,8 @@ final class StackCaptureCoordinator: ObservableObject {
     }
     /// Manual Pro overrides (frame count / ISO / shutter / focus). Auto by default.
     @Published var pro: ProControls = .auto
+    /// User burst length/window for the long-exposure looks (ignored by the static looks).
+    @Published var burst: BurstSettings = .default
     /// Read-only access to the library for the editor.
     var library: LibraryStore { store }
 
@@ -60,7 +62,7 @@ final class StackCaptureCoordinator: ObservableObject {
         isCapturing = true
         let frames: [RawSensorFrame]
         do {
-            frames = try await capture.captureBurst(recipe: .recipe(for: mode).applying(pro))
+            frames = try await capture.captureBurst(recipe: makeRecipe(for: mode))
         } catch {
             lastError = error.localizedDescription
             isCapturing = false
@@ -69,6 +71,20 @@ final class StackCaptureCoordinator: ObservableObject {
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
         guard !frames.isEmpty else { lastError = "No frames were captured."; return }
         enqueueProcessing(frames: frames, mode: mode)
+    }
+
+    /// Build the capture recipe for `mode`. Long-exposure looks take their length/window from
+    /// `burst` (the edge sliders) plus any manual Pro exposure overrides; static looks use the fixed
+    /// per-look recipe with the full Pro overrides. (design 2026-06-07 §5)
+    private func makeRecipe(for mode: StackMode) -> CaptureRecipe {
+        if mode.isLongExposure {
+            return CaptureRecipe(frameCount: burst.photoCount,
+                                 durationSeconds: burst.durationSeconds,
+                                 manualISO: pro.iso.map(Float.init),
+                                 manualShutterSeconds: pro.shutterSeconds,
+                                 manualFocus: pro.focus.map(Float.init))
+        }
+        return CaptureRecipe.recipe(for: mode).applying(pro)
     }
 
     /// Queue develop→align→stack→encode→save behind any earlier job (serial), running the heavy work
