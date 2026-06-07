@@ -48,9 +48,13 @@ struct CaptureView: View {
                 if let img = lastResult {
                     VStack {
                         Image(uiImage: img).resizable().scaledToFit()
-                        if coordinator.lastSavedID != nil {
-                            Button("Edit") { openEditor() }
+                        HStack {
+                            if coordinator.lastSavedID != nil {
+                                Button("Edit") { openEditor() }.buttonStyle(.bordered).tint(.white)
+                            }
+                            Button("Done") { coordinator.dismissResult() }
                                 .buttonStyle(.bordered).tint(.white)
+                                .accessibilityIdentifier("dismiss-result")
                         }
                     }.padding()
                 } else {

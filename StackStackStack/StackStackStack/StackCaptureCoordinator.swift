@@ -105,6 +105,13 @@ final class StackCaptureCoordinator: ObservableObject {
         enqueueProcessing(frames: frames, mode: mode, orientationQuarterTurns: orientationTurns)
     }
 
+    /// Clear the on-screen result preview, returning the capture screen to the live viewfinder.
+    func dismissResult() {
+        lastResultJPEG = nil
+        lastSavedID = nil
+        lastError = nil          // symmetric with the look-change clear; no stale "Failed…" after dismiss
+    }
+
     /// Build the capture recipe for `mode`. Long-exposure looks take their length/window from
     /// `burst` (the edge sliders) plus any manual Pro exposure overrides; static looks use the fixed
     /// per-look recipe with the full Pro overrides. Called synchronously from `shoot()` before any

@@ -163,6 +163,18 @@ final class CoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testDismissResultClearsPreview() async throws {
+        let (coord, _) = makeCoordinator()
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNotNil(coord.lastResultJPEG)
+        XCTAssertNotNil(coord.lastSavedID)
+        coord.dismissResult()
+        XCTAssertNil(coord.lastResultJPEG, "dismiss clears the result preview")
+        XCTAssertNil(coord.lastSavedID)
+    }
+
+    @MainActor
     func testShootClearsAeAfLock() async throws {
         let (coord, _) = makeCoordinator()
         coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
