@@ -6,4 +6,8 @@ struct ProControls: Sendable, Equatable {
     var focus: Double?          // manual lens position, 0 (near) … 1 (far)
 
     static let auto = ProControls()
+
+    /// True if any focus/exposure override is set (frame count doesn't affect AF/AE). Tap-to-focus
+    /// requires full-auto AF/AE, so it's gated off when this is true.
+    var hasManualFocusOrExposure: Bool { focus != nil || iso != nil || shutterSeconds != nil }
 }

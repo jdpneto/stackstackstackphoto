@@ -29,7 +29,7 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published var pro: ProControls = .auto {
         // Tapping is disabled in manual mode (see `tapToFocusEnabled`); drop any AE/AF lock so the
         // banner doesn't linger.
-        didSet { if pro != oldValue, pro.focus != nil || pro.iso != nil || pro.shutterSeconds != nil { aeAfLocked = false } }
+        didSet { if pro != oldValue, pro.hasManualFocusOrExposure { aeAfLocked = false } }
     }
     /// User burst length/window for the long-exposure looks (ignored by the static looks).
     @Published var burst: BurstSettings = .default
@@ -63,9 +63,7 @@ final class StackCaptureCoordinator: ObservableObject {
 
     /// Tap-to-focus is available only in full-auto exposure/focus (no manual Pro override) and while
     /// the shutter is free. (design tap-to-focus §3.3)
-    var tapToFocusEnabled: Bool {
-        pro.focus == nil && pro.iso == nil && pro.shutterSeconds == nil && !isBusy
-    }
+    var tapToFocusEnabled: Bool { !pro.hasManualFocusOrExposure && !isBusy }
 
     /// Focus + meter exposure at a normalized device point; `lock` (long-press) holds AF/AE and shows
     /// the banner. (design tap-to-focus §3.3)

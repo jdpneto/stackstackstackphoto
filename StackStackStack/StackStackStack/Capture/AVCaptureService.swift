@@ -325,10 +325,12 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
             }
             if dev.isExposurePointOfInterestSupported {
                 dev.exposurePointOfInterest = point
-                // Lock: meter once and hold (.autoExpose). Tap: keep metering the subject (.continuousAutoExposure).
-                let mode: AVCaptureDevice.ExposureMode = lock ? .autoExpose : .continuousAutoExposure
-                if dev.isExposureModeSupported(mode) { dev.exposureMode = mode }
-                else if dev.isExposureModeSupported(.continuousAutoExposure) { dev.exposureMode = .continuousAutoExposure }
+                // Lock: meter once and hold (.autoExpose), else freeze (.locked). Tap: keep metering the
+                // subject (.continuousAutoExposure), else meter once (.autoExpose).
+                let primary: AVCaptureDevice.ExposureMode = lock ? .autoExpose : .continuousAutoExposure
+                let fallback: AVCaptureDevice.ExposureMode = lock ? .locked : .autoExpose
+                if dev.isExposureModeSupported(primary) { dev.exposureMode = primary }
+                else if dev.isExposureModeSupported(fallback) { dev.exposureMode = fallback }
             }
             // White balance is intentionally left as-is — it's locked per-burst by lockExposureAndFocus and
             // re-locked at the next shoot; tap-to-focus only adjusts focus + exposure (design tap-to-focus §2).
