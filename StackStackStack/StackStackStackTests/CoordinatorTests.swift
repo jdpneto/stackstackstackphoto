@@ -155,6 +155,24 @@ final class CoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testFocusAndExposeIsNoOpWhenDisabled() {
+        let (coord, _) = makeCoordinator()
+        coord.pro = ProControls(iso: 800)   // manual exposure → tapToFocusEnabled == false
+        coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
+        XCTAssertFalse(coord.aeAfLocked, "a gesture while disabled (manual mode) must not set the AE/AF lock")
+    }
+
+    @MainActor
+    func testShootClearsAeAfLock() async throws {
+        let (coord, _) = makeCoordinator()
+        coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
+        XCTAssertTrue(coord.aeAfLocked)
+        await coord.shoot()                  // a new shot supersedes the long-press lock
+        XCTAssertFalse(coord.aeAfLocked, "shooting clears the AE/AF lock so the banner doesn't linger")
+        await coord.awaitProcessing()
+    }
+
+    @MainActor
     func testTapToFocusDisabledWhileBusy() async throws {
         let (coord, _) = makeCoordinator()
         await coord.shoot()   // capture done; the stack is queued (processingCount > 0) but its Task hasn't

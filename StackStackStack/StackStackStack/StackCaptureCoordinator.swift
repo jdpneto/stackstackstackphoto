@@ -68,6 +68,7 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Focus + meter exposure at a normalized device point; `lock` (long-press) holds AF/AE and shows
     /// the banner. (design tap-to-focus §3.3)
     func focusAndExpose(atDevicePoint point: CGPoint, lock: Bool) {
+        guard tapToFocusEnabled else { return }   // ignore a stale gesture fired as a burst/manual mode began
         capture.setFocusExposure(atDevicePoint: point, lock: lock)
         aeAfLocked = lock
     }
@@ -78,6 +79,7 @@ final class StackCaptureCoordinator: ObservableObject {
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
+        aeAfLocked = false                   // a long-press lock is superseded once a shot begins
         isCapturing = true
         let gating: @Sendable () -> Bool
         if mode.isLongExposure {
