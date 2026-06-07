@@ -25,4 +25,16 @@ final class SteadinessMathTests: XCTestCase {
         let r = SteadinessMath.evaluate(deltaPitch: 0.0, deltaRoll: -0.12, tolerance: 0.05, fullScale: 0.12)
         XCTAssertEqual(r.offset.x, -1.0, accuracy: 1e-9)
     }
+
+    func testExactToleranceBoundaryIsSteady() {
+        let r = SteadinessMath.evaluate(deltaPitch: 0.05, deltaRoll: 0.0, tolerance: 0.05, fullScale: 0.12)
+        XCTAssertTrue(r.steady, "at exactly tolerance the verdict must be steady (mag <= tolerance)")
+    }
+
+    func testDiagonalOffsetClampsBothAxesToUnit() {
+        let r = SteadinessMath.evaluate(deltaPitch: 0.12, deltaRoll: 0.12, tolerance: 0.05, fullScale: 0.12)
+        XCTAssertEqual(r.offset.x, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(r.offset.y, 1.0, accuracy: 1e-9)
+        XCTAssertFalse(r.steady)
+    }
 }

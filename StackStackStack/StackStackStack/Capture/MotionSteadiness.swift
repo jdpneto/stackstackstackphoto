@@ -24,7 +24,11 @@ final class MotionSteadiness: ObservableObject, @unchecked Sendable {
     @Published private(set) var isWithinTolerance = true
 
     private let manager = CMMotionManager()
-    private let queue = OperationQueue()
+    private let queue: OperationQueue = {
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 1   // serial delivery → `reference` is race-free
+        return q
+    }()
     private var reference: CMAttitude?                        // touched only on `queue`
     private let lock = NSLock()
     private var steadyFlag = true
@@ -35,13 +39,13 @@ final class MotionSteadiness: ObservableObject, @unchecked Sendable {
     var isSteady: Bool { lock.lock(); defer { lock.unlock() }; return steadyFlag }
 
     func start() {
+        manager.stopDeviceMotionUpdates()   // idempotent; ensures no prior stream/handler races a restart
         setSteady(true)
         offset = .zero
         isWithinTolerance = true
         guard manager.isDeviceMotionAvailable else { return }   // Simulator / no sensor → always steady
-        queue.maxConcurrentOperationCount = 1                    // serial delivery → `reference` is race-free
-        reference = nil
         manager.deviceMotionUpdateInterval = 1.0 / 60.0
+        queue.addOperation { self.reference = nil }   // serialized before any new motion callbacks
         manager.startDeviceMotionUpdates(to: queue) { [weak self] motion, _ in
             guard let self, let m = motion else { return }
             if self.reference == nil { self.reference = m.attitude.copy() as? CMAttitude }

@@ -139,7 +139,9 @@ struct CaptureView: View {
         if coordinator.isCapturing && coordinator.mode.isLongExposure {
             GeometryReader { geo in
                 let big: CGFloat = 120, small: CGFloat = 36
-                let maxShift = (big - small) / 2
+                // Constrain so the dot's EDGE stays inside the ring even at a diagonal max offset:
+                // maxShift·√2 + small/2 ≤ big/2.
+                let maxShift = (big / 2 - small / 2) / CGFloat(2).squareRoot()
                 let cx = geo.size.width / 2, cy = geo.size.height / 2
                 ZStack {
                     Circle().stroke(Color.white.opacity(0.7), lineWidth: 3)

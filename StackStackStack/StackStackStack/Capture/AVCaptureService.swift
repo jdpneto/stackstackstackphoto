@@ -319,6 +319,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         guard let cont = continuation else { return }
         continuation = nil
         currentID = nil            // ignore any late stragglers / watchdog fires
+        isSteadyCheck = { true }    // release any captured coordinator/MotionSteadiness reference
         let frames = pending
         pending = []
         if frames.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
