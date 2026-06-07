@@ -104,12 +104,13 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Await all queued/in-flight background processing (tests; also "wait for everything to settle").
     func awaitProcessing() async { await processingTail?.value }
 
-    /// Cancel every queued/in-flight background stack. Each job discards its partial work without
-    /// saving (no error surfaced), freeing the shutter immediately. (design 2026-06-07 §7)
+    /// Cancel every queued/in-flight background stack. The per-job token (NOT Task cancellation — the
+    /// heavy work runs in `Task.detached`, which doesn't inherit it) makes each job discard its partial
+    /// work without saving (no error surfaced) and settle its `processingCount` via `defer`, freeing the
+    /// shutter. (design 2026-06-07 §7)
     func cancelProcessing() {
         for token in activeTokens { token.cancel() }
         activeTokens.removeAll()
-        processingTail?.cancel()
     }
 
     /// Managed working resolution (long-edge px) the stack is processed at. Full-sensor RAW (~12 MP)
@@ -135,6 +136,7 @@ final class StackCaptureCoordinator: ObservableObject {
             } else {
                 let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
                                                          workingResolution: managedWorkingResolution)
+                if shouldCancel() { throw CancellationError() }   // cancel between develop and reduce (static path)
                 if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
                 result = Pipeline.reduceImages(developed, mode: mode, workingResolution: managedWorkingResolution)
             }
