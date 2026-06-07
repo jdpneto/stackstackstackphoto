@@ -1,6 +1,7 @@
 import Foundation
 import Combine            // required for ObservableObject / @Published
 import QuartzCore         // CALayer for the preview
+import UIKit
 import StackEngineCore
 
 /// Orchestrates one shot: a fast foreground BURST (the arms-up step), then develop+align+stack+save
@@ -20,6 +21,11 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published private(set) var lastError: String?
     /// True while AF/AE are locked via a long-press on the preview (drives the "AE/AF LOCK" banner).
     @Published private(set) var aeAfLocked = false
+    /// Live capture progress (drives the on-screen counter + countdown during the burst).
+    @Published private(set) var capturedCount = 0
+    @Published private(set) var captureTotal = 0
+    @Published private(set) var captureRemainingSeconds = 0
+    private var countdownTask: Task<Void, Never>?
     /// The currently selected look. Settable from the capture UI. Switching looks drops the on-screen
     /// result (a new look implies a new shot), so the preview and "Saved ✓" don't go stale.
     @Published var mode: StackMode = .noiseReduction {
@@ -77,10 +83,17 @@ final class StackCaptureCoordinator: ObservableObject {
     func shoot() async {
         guard !isBusy else { return }   // reject a rapid double-tap, and a shot during the background stack
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
+        // UIDevice.current.orientation is main-thread-only; safe here (coordinator is @MainActor, shoot runs on it).
+        let orientationTurns = CaptureOrientation.quarterTurns(for: UIDevice.current.orientation)
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
         aeAfLocked = false                   // a long-press lock is superseded once a shot begins
+        let recipe = makeRecipe(for: mode)
         isCapturing = true
+        capturedCount = 0
+        captureTotal = recipe.frameCount
+        captureRemainingSeconds = Int(ceil(recipe.durationSeconds))
+        startCaptureCountdown()
         let gating: @Sendable () -> Bool
         if mode.isLongExposure {
             steadiness.start()
@@ -88,10 +101,17 @@ final class StackCaptureCoordinator: ObservableObject {
         } else {
             gating = { true }
         }
-        defer { if mode.isLongExposure { steadiness.stop() } }   // stops on every exit (success/throw/empty)
+        defer {
+            if mode.isLongExposure { steadiness.stop() }
+            countdownTask?.cancel(); countdownTask = nil
+            captureRemainingSeconds = 0   // don't leave a stale value between shots
+        }
+        let progress: @Sendable (Int) -> Void = { [weak self] n in
+            Task { @MainActor in self?.capturedCount = n }
+        }
         let frames: [RawSensorFrame]
         do {
-            frames = try await capture.captureBurst(recipe: makeRecipe(for: mode), isSteady: gating)
+            frames = try await capture.captureBurst(recipe: recipe, isSteady: gating, onProgress: progress)
         } catch {
             lastError = error.localizedDescription
             isCapturing = false
@@ -99,7 +119,26 @@ final class StackCaptureCoordinator: ObservableObject {
         }
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
         guard !frames.isEmpty else { lastError = "No frames were captured."; return }
-        enqueueProcessing(frames: frames, mode: mode)
+        enqueueProcessing(frames: frames, mode: mode, orientationQuarterTurns: orientationTurns)
+    }
+
+    /// Clear the on-screen result preview, returning the capture screen to the live viewfinder.
+    func dismissResult() {
+        lastResultJPEG = nil
+        lastSavedID = nil
+        lastError = nil          // symmetric with the look-change clear; no stale "Failed…" after dismiss
+    }
+
+    /// One-second ticks decrementing `captureRemainingSeconds` to 0 while the burst runs.
+    private func startCaptureCountdown() {
+        countdownTask?.cancel()
+        countdownTask = Task { [weak self] in
+            while !Task.isCancelled, let s = self?.captureRemainingSeconds, s > 0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled, let self else { break }
+                captureRemainingSeconds = max(0, captureRemainingSeconds - 1)
+            }
+        }
     }
 
     /// Build the capture recipe for `mode`. Long-exposure looks take their length/window from
@@ -120,7 +159,7 @@ final class StackCaptureCoordinator: ObservableObject {
 
     /// Queue develop→align→stack→encode→save behind any earlier job (serial), running the heavy work
     /// off the MainActor, then publish the result. The shutter stays free meanwhile.
-    private func enqueueProcessing(frames: [RawSensorFrame], mode: StackMode) {
+    private func enqueueProcessing(frames: [RawSensorFrame], mode: StackMode, orientationQuarterTurns: Int) {
         processingCount += 1
         let token = CancellationToken()
         activeTokens.append(token)
@@ -135,6 +174,7 @@ final class StackCaptureCoordinator: ObservableObject {
             if token.isCancelled { return }                        // cancelled while queued
             do {
                 let jpeg = try await Self.makeJPEG(from: frames, mode: mode,
+                                                   orientationQuarterTurns: orientationQuarterTurns,
                                                    shouldCancel: { token.isCancelled })
                 if token.isCancelled { return }                    // cancelled during processing → discard
                 let saved = try self.store.save(resultJPEG: jpeg, mode: mode.rawValue, frameCount: frames.count)
@@ -172,6 +212,7 @@ final class StackCaptureCoordinator: ObservableObject {
 
     /// CPU-heavy develop → downscale → align → stack → encode, run off the MainActor.
     nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode,
+                                             orientationQuarterTurns: Int,
                                              shouldCancel: @escaping @Sendable () -> Bool) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
             let result: PixelImage
@@ -187,8 +228,9 @@ final class StackCaptureCoordinator: ObservableObject {
                 if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
                 result = Pipeline.reduceImages(developed, mode: mode)   // already at working resolution
             }
-            let rgba = OutputTransform.encodeSRGB8(result)
-            return try ImageEncoder.encode(rgba8: rgba, width: result.width, height: result.height,
+            let oriented = ImageGeometry.rotated(result, quarterTurns: orientationQuarterTurns)   // bake upright
+            let rgba = OutputTransform.encodeSRGB8(oriented)
+            return try ImageEncoder.encode(rgba8: rgba, width: oriented.width, height: oriented.height,
                                            format: .jpeg, quality: 0.95)
         }.value
     }

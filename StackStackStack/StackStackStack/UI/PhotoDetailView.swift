@@ -16,6 +16,7 @@ struct PhotoDetailView: View {
     @State private var editSource: EditSource?
     @State private var sharing = false
     @State private var confirmingDelete = false
+    @State private var rotating = false
 
     /// Everything the editor needs, loaded off the main thread before the sheet is presented.
     private struct EditSource: Identifiable {
@@ -30,7 +31,7 @@ struct PhotoDetailView: View {
             ZStack {
                 Color.black.ignoresSafeArea()
                 if let image {
-                    Image(uiImage: image).resizable().scaledToFit()
+                    ZoomableScrollView(image: image).ignoresSafeArea()
                 } else if loaded {
                     VStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle")
@@ -45,6 +46,10 @@ struct PhotoDetailView: View {
                     Button("Done") { dismiss() }
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button { rotate(by: -1) } label: { Image(systemName: "rotate.left") }
+                        .accessibilityLabel("Rotate left").disabled(rotating)
+                    Button { rotate(by: 1) } label: { Image(systemName: "rotate.right") }
+                        .accessibilityLabel("Rotate right").disabled(rotating)
                     Button { sharing = true } label: { Image(systemName: "square.and.arrow.up") }
                         .accessibilityLabel("Share")
                     Button { openEditor() } label: { Image(systemName: "slider.horizontal.3") }
@@ -93,6 +98,34 @@ struct PhotoDetailView: View {
             guard let (data, adj, prevData) = loaded else { return }
             editSource = EditSource(id: id, original: data, adjustments: adj,
                                     preview: prevData.flatMap { UIImage(data: $0) })
+        }
+    }
+
+    /// Persist a 90° rotation as a non-destructive `quarterTurns` adjustment: render the original
+    /// through the updated adjustments off-main, then save via the same path the editor uses.
+    private func rotate(by delta: Int) {
+        guard !rotating else { return }
+        rotating = true
+        let id = record.id, lib = store
+        Task {
+            let result: (ImageAdjustments, Data)? = await Task.detached(priority: .userInitiated) {
+                // originalData and adjustments are safe to read off the main thread (file I/O only).
+                guard let original = lib.originalData(for: id) else { return nil }
+                var adj = lib.adjustments(for: id)
+                adj.quarterTurns += delta   // ImageAdjustments normalizes into 0…3 via its didSet
+                guard let rendered = ResultRenderer.render(originalJPEG: original, adjustments: adj, quality: 0.95)
+                else { return nil }
+                return (adj, rendered)
+            }.value
+            rotating = false
+            guard let (adj, rendered) = result else { return }
+            do {
+                // applyEdit is a write (read-modify-write on index.json) — must be MainActor-confined.
+                // The enclosing Task inherits the MainActor from the SwiftUI action that called rotate(by:).
+                try lib.applyEdit(id: id, adjustments: adj, renderedJPEG: rendered)
+                image = UIImage(data: rendered)   // reflect in the viewer
+                onChanged()                        // refresh the gallery
+            } catch { /* transient render/save failure: leave the current image */ }
         }
     }
 

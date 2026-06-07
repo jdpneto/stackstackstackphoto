@@ -12,6 +12,7 @@ struct CaptureView: View {
     @State private var previewLayer: CALayer?
     @State private var focusIndicator: FocusIndicator?
     @State private var focusSquareScale: CGFloat = 1.0
+    @State private var orientationActive = false   // balances begin/end device-orientation notifications
 
     private struct FocusIndicator: Identifiable, Equatable {
         let id = UUID()
@@ -39,6 +40,7 @@ struct CaptureView: View {
                 }
             ).ignoresSafeArea()   // live viewfinder (nil → black)
             burstSliders
+            captureProgressOverlay
             steadinessOverlay
             focusIndicatorOverlay
             aeAfBanner
@@ -47,9 +49,13 @@ struct CaptureView: View {
                 if let img = lastResult {
                     VStack {
                         Image(uiImage: img).resizable().scaledToFit()
-                        if coordinator.lastSavedID != nil {
-                            Button("Edit") { openEditor() }
+                        HStack {
+                            if coordinator.lastSavedID != nil {
+                                Button("Edit") { openEditor() }.buttonStyle(.bordered).tint(.white)
+                            }
+                            Button("Done") { coordinator.dismissResult() }
                                 .buttonStyle(.bordered).tint(.white)
+                                .accessibilityIdentifier("dismiss-result")
                         }
                     }.padding()
                 } else {
@@ -69,6 +75,13 @@ struct CaptureView: View {
         }
         // Start the live preview when the capture screen appears (no-op on the Simulator fake).
         .task { if previewLayer == nil { previewLayer = await coordinator.startPreview() } }
+        // begin/end is ref-counted; guard so a re-appear (e.g. tab switch) can't leave it unbalanced.
+        .onAppear {
+            if !orientationActive { UIDevice.current.beginGeneratingDeviceOrientationNotifications(); orientationActive = true }
+        }
+        .onDisappear {
+            if orientationActive { UIDevice.current.endGeneratingDeviceOrientationNotifications(); orientationActive = false }
+        }
         // Decode the finished JPEG once, from the coordinator's published result — no disk read.
         .onReceive(coordinator.$lastResultJPEG) { data in
             lastResult = data.flatMap { UIImage(data: $0) }
@@ -227,9 +240,10 @@ struct CaptureView: View {
     }
 
     /// Vertical Photos/Duration sliders pinned to the left/right edges, shown only for the
-    /// long-exposure looks. Each shows its value live as you drag. (design 2026-06-07 §5)
+    /// long-exposure looks (and hidden while capturing so the progress overlay has clear space).
+    /// Each shows its value live as you drag. (design 2026-06-07 §5)
     @ViewBuilder private var burstSliders: some View {
-        if coordinator.mode.isLongExposure {
+        if coordinator.mode.isLongExposure && !coordinator.isCapturing {
             HStack {
                 verticalBurstControl(
                     title: "Photos",
@@ -251,6 +265,29 @@ struct CaptureView: View {
             }
             .padding(.horizontal, 6)
             .disabled(coordinator.isBusy)
+        }
+    }
+
+    /// During a burst: photos-taken counter (left) and seconds-remaining countdown (right).
+    @ViewBuilder private var captureProgressOverlay: some View {
+        if coordinator.isCapturing {
+            HStack(alignment: .top) {
+                progressLabel("Photos", "\(coordinator.capturedCount)/\(coordinator.captureTotal)")
+                    .accessibilityIdentifier("capture-photo-count")
+                Spacer()
+                progressLabel("Time", "\(coordinator.captureRemainingSeconds)s")
+                    .accessibilityIdentifier("capture-time-remaining")
+            }
+            .padding(.horizontal, 16).padding(.top, 60)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func progressLabel(_ title: String, _ value: String) -> some View {
+        VStack(spacing: 2) {
+            Text(title).font(.caption2).foregroundColor(.white.opacity(0.8))
+            Text(value).font(.headline).bold().foregroundColor(.white)
         }
     }
 

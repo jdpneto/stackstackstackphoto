@@ -9,6 +9,7 @@ public enum ImageEditor {
     public static func apply(_ adj: ImageAdjustments, to img: PixelImage) -> PixelImage {
         if adj.isIdentity { return img }
         var out = img
+        if adj.quarterTurns != 0 { out = ImageGeometry.rotated(out, quarterTurns: adj.quarterTurns) }
         if adj.straightenDegrees != 0 { out = straighten(out, degrees: adj.straightenDegrees) }
         if adj.cropAspect.ratio != nil { out = crop(out, aspect: adj.cropAspect) }
         // Geometry-only edits skip the per-pixel tonal pass entirely.

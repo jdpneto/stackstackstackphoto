@@ -163,6 +163,18 @@ final class CoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testDismissResultClearsPreview() async throws {
+        let (coord, _) = makeCoordinator()
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNotNil(coord.lastResultJPEG)
+        XCTAssertNotNil(coord.lastSavedID)
+        coord.dismissResult()
+        XCTAssertNil(coord.lastResultJPEG, "dismiss clears the result preview")
+        XCTAssertNil(coord.lastSavedID)
+    }
+
+    @MainActor
     func testShootClearsAeAfLock() async throws {
         let (coord, _) = makeCoordinator()
         coord.focusAndExpose(atDevicePoint: CGPoint(x: 0.5, y: 0.5), lock: true)
@@ -180,5 +192,19 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertFalse(coord.tapToFocusEnabled, "tap-to-focus is disabled while a stack is processing")
         await coord.awaitProcessing()
         XCTAssertTrue(coord.tapToFocusEnabled, "re-enabled once processing finishes")
+    }
+
+    @MainActor
+    func testCapturePublishesProgress() async throws {
+        let (coord, _) = makeCoordinator()
+        coord.mode = .noiseReduction          // Detail: fixed 8-frame burst
+        await coord.shoot()                   // Fake fires onProgress per synthesized frame
+        // The Fake runs off the MainActor, so all 8 `Task { @MainActor in capturedCount = k }` hops are
+        // enqueued on the MainActor (FIFO) before shoot()'s continuation resumed the test — one yield puts
+        // the test behind them, so they're guaranteed to have run by the asserts (SE-0306 serial executor).
+        await Task.yield()
+        XCTAssertEqual(coord.captureTotal, 8, "total reflects the recipe frame count")
+        XCTAssertEqual(coord.capturedCount, 8, "counter reaches the captured frame count")
+        await coord.awaitProcessing()
     }
 }

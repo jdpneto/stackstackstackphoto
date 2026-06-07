@@ -13,7 +13,8 @@ struct FakeCaptureService: CaptureService {
     /// No live preview in the Simulator — the capture screen falls back to its neutral background.
     func startPreview() async -> CALayer? { nil }
 
-    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> [RawSensorFrame] {
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> [RawSensorFrame] {
         await Task.yield()   // model a non-instant capture so the shutter's re-entrancy guard applies
         let n = max(recipe.frameCount, 1)
         return (0..<n).map { k in
@@ -29,9 +30,11 @@ struct FakeCaptureService: CaptureService {
                 let x = cx + dx, y = cy + dy
                 if x >= 0, x < width, y >= 0, y < height { mosaic[y * width + x] = 1000 }
             }}
-            return RawSensorFrame(width: width, height: height, mosaic: mosaic,
-                                  blackLevel: 64, whiteLevel: 1024, cfa: .rggb,
-                                  wbGains: SIMD3<Float>(1, 1, 1))
+            let frame = RawSensorFrame(width: width, height: height, mosaic: mosaic,
+                                       blackLevel: 64, whiteLevel: 1024, cfa: .rggb,
+                                       wbGains: SIMD3<Float>(1, 1, 1))
+            onProgress?(k + 1)
+            return frame
         }
     }
 }
