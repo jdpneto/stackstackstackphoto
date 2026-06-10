@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 import StackEngineCore
 @testable import StackStackStack
 
@@ -45,17 +46,19 @@ final class FakeCaptureServiceTests: XCTestCase {
     func testFocusSweepReportsProgressPerBracket() async throws {
         let svc = FakeCaptureService(width: 32, height: 16)
         let recipe = CaptureRecipe.recipe(for: .depthOfField).applying(ProControls(frameCount: 3))
-        let counter = ProgressCounter()
+        let log = ProgressLog()
+        // FakeCaptureService fires onProgress synchronously per bracket — record directly with no
+        // Task wrapping so the ordering is guaranteed without any sleep. (design §12)
         _ = try await svc.captureBurst(recipe: recipe, isSteady: { true },
-                                       onProgress: { n in Task { await counter.record(n) } })
-        // Give the recording tasks a beat to land.
-        try await Task.sleep(nanoseconds: 50_000_000)
-        let seen = await counter.values
-        XCTAssertEqual(seen, [1, 2, 3])
+                                       onProgress: { n in log.record(n) })
+        XCTAssertEqual(log.values, [1, 2, 3])
     }
 }
 
-private actor ProgressCounter {
-    private(set) var values: [Int] = []
-    func record(_ n: Int) { values.append(n) }
+/// Thread-safe progress log for synchronous callbacks. `NSLock.withLock` is available iOS 16+.
+private final class ProgressLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _values: [Int] = []
+    var values: [Int] { lock.withLock { _values } }
+    func record(_ n: Int) { lock.withLock { _values.append(n) } }
 }
