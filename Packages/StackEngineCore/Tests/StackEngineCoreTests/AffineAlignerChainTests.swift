@@ -7,20 +7,23 @@ import simd
 /// case to borrow a fixture). Bracket k is "in focus" (full texture amplitude) only in vertical
 /// band k and "defocused" (damped amplitude) elsewhere, then warped by the CUMULATIVE drift D_k
 /// (breathing scale + jitter). Low pixel frequency keeps bilinear resampling accurate (same
-/// rationale as AffineAlignerTests.texture). Returns the frames and each frame's cumulative
-/// drift D_k (D_0 = identity).
-func chainBracketFrames(count: Int, w: Int, h: Int,
-                        stepScale: Float, stepRot: Float, stepTx: Float, stepTy: Float)
+/// rationale as AffineAlignerTests.texture).
+///
+/// `steps` contains one per-step transform; `frames.count == steps.count + 1`. The cumulative
+/// drift is `drifts[0] = .identity`, `drifts[k] = steps[k-1].composed(with: drifts[k-1])`.
+/// Using VARIED (non-constant) steps makes the composition non-commutative, so tests catch a
+/// transposed `link.composed(with: transforms[i-1])` vs `transforms[i-1].composed(with: link)`.
+func chainBracketFrames(w: Int, h: Int, steps: [Transform2D])
     -> (frames: [PixelImage], drifts: [Transform2D]) {
-    var drift = Transform2D.identity
+    let count = steps.count + 1
+    var drifts: [Transform2D] = [.identity]
+    for step in steps {
+        drifts.append(step.composed(with: drifts.last!))
+    }
     var frames: [PixelImage] = []
-    var drifts: [Transform2D] = []
     for k in 0..<count {
-        frames.append(k == 0 ? chainBracketContent(band: k, of: count, w: w, h: h)
-                             : AffineAligner.warp(chainBracketContent(band: k, of: count, w: w, h: h), by: drift))
-        drifts.append(drift)
-        drift = Transform2D.similarity(scale: stepScale, rotation: stepRot, tx: stepTx, ty: stepTy)
-            .composed(with: drift)
+        let content = chainBracketContent(band: k, of: count, w: w, h: h)
+        frames.append(k == 0 ? content : AffineAligner.warp(content, by: drifts[k]))
     }
     return (frames, drifts)
 }
@@ -46,9 +49,15 @@ final class AffineAlignerChainTests: XCTestCase {
     }
 
     func testChainRecoversCompoundDriftAcrossBlurVaryingBrackets() {
-        // 4 brackets, per-step drift well inside ChainBounds (scale +1.2%, ~1px shift).
-        let (frames, drifts) = chainBracketFrames(count: 4, w: 96, h: 64,
-                                             stepScale: 1.012, stepRot: 0.004, stepTx: 1.0, stepTy: -0.5)
+        // 4 brackets: varied per-step drift (alternating rotation sign, varied tx/ty) — all
+        // inside ChainBounds: |scale−1| ≤ 0.012, |rot| ≤ 0.004, |t| ≤ ~1.1 px.
+        // Steps are NON-CONSTANT and VARIED so composition is non-commutative in general.
+        let steps: [Transform2D] = [
+            .similarity(scale: 1.012, rotation:  0.004, tx:  1.0, ty: -0.5),
+            .similarity(scale: 1.008, rotation: -0.003, tx:  0.7, ty:  0.8),
+            .similarity(scale: 1.010, rotation:  0.002, tx: -0.6, ty: -0.9),
+        ]
+        let (frames, drifts) = chainBracketFrames(w: 96, h: 64, steps: steps)
         let transforms = AffineAligner.alignChain(frames, referenceIndex: 0)
         XCTAssertEqual(transforms.count, 4)
         XCTAssertEqual(transforms[0], .identity)
@@ -71,16 +80,81 @@ final class AffineAlignerChainTests: XCTestCase {
     }
 
     func testReferenceInTheMiddleAlignsBothDirections() {
-        let (frames, drifts) = chainBracketFrames(count: 3, w: 96, h: 64,
-                                             stepScale: 1.01, stepRot: 0, stepTx: 1.0, stepTy: 0)
+        // 3 brackets with varied steps so composition is non-commutative.
+        let steps: [Transform2D] = [
+            .similarity(scale: 1.010, rotation:  0.003, tx:  1.0, ty: -0.4),
+            .similarity(scale: 1.008, rotation: -0.002, tx:  0.8, ty:  0.5),
+        ]
+        let (frames, drifts) = chainBracketFrames(w: 96, h: 64, steps: steps)
         let transforms = AffineAligner.alignChain(frames, referenceIndex: 1)
         XCTAssertEqual(transforms[1], .identity)
-        // transforms[k] maps reference(frame-1) coords → frame-k coords: D_k ∘ D_1⁻¹.
+        // transforms[k] maps reference(frame-1) coords → frame-k coords.
+        // Derivation: aligned_k[p] = frame_k[T(p)] must reproduce the reference geometry, i.e.
+        // D_k·T(p) = D_1·p  ⇒  T = D_k⁻¹ ∘ D_1.
         for k in [0, 2] {
-            let want = params(drifts[k].composed(with: drifts[1].inverse).inverse)
+            let want = params(drifts[k].inverse.composed(with: drifts[1]))
             let got = params(transforms[k])
             XCTAssertEqual(got.scale, want.scale, accuracy: 0.02, "frame \(k) scale")
             XCTAssertEqual(got.tx, want.tx, accuracy: 1.5, "frame \(k) tx")
+            XCTAssertEqual(got.ty, want.ty, accuracy: 1.5, "frame \(k) ty")
         }
+    }
+
+    /// Directly verifies that `accumulateLinks` uses `link.composed(with: prev)` (not reversed)
+    /// by injecting exact algebraically-constructed links — bypassing the estimator entirely so
+    /// composition-order errors are never masked by estimation noise.
+    ///
+    /// WHY the integration tests above cannot catch this:
+    ///   For within-ChainBounds drifts (|rot| ≤ 0.0175 rad, |tx| ≤ 1.44 px), the Lie commutator
+    ///   [link₂, link₁] is O(|rot|·|tx|) ≈ 0.003–0.05 px — sub-pixel and undetectable at 1.5 px
+    ///   tolerance. The integration tests verify ESTIMATION QUALITY; this test isolates the
+    ///   COMPOSITION-ORDER algebra in `accumulateLinks` via exact inputs.
+    ///
+    /// Mutation sensitivity: for scale+translation links with (scale−1)·tx terms:
+    ///   link2.composed(with: link1).tx = scale2 · tx1 + tx2
+    ///   link1.composed(with: link2).tx = scale1 · tx2 + tx1   [wrong order]
+    ///   difference = |(scale2−1)·tx1 − (scale1−1)·tx2|
+    ///
+    /// With link1=(scale=1.5, tx=3) and link2=(scale=0.7, tx=−4):
+    ///   diff = |(0.7−1)·3 − (1.5−1)·(−4)| = |−0.9 + 2.0| = 1.1 px >> 1e-4 tolerance.
+    func testAccumulateLinksOrderIsLinkComposedWithPrev() {
+        // Pure scale+translation links (rotation=0). These do NOT commute when scales differ:
+        //   L2 ∘ L1 tx = scale2*tx1 + tx2, L1 ∘ L2 tx = scale1*tx2 + tx1  (generally unequal).
+        let link1 = Transform2D.similarity(scale: 1.5, rotation: 0, tx:  3.0, ty: 0)
+        let link2 = Transform2D.similarity(scale: 0.7, rotation: 0, tx: -4.0, ty: 0)
+        let link3 = Transform2D.similarity(scale: 1.2, rotation: 0, tx:  2.0, ty: 0)
+
+        // Correct accumulated transforms (link.composed(with: prev)):
+        //   t1 = link1; t2 = link2 ∘ link1; t3 = link3 ∘ link2 ∘ link1
+        let t1_want = link1
+        let t2_want = link2.composed(with: link1)
+        let t3_want = link3.composed(with: t2_want)
+
+        // Wrong accumulated transforms (prev.composed(with: link)):
+        //   t1 = link1 (same for first step: id.composed(with: link1) = link1)
+        //   t2 = link1 ∘ link2; t3 = (link1 ∘ link2) ∘ link3
+        let t2_wrong = link1.composed(with: link2)
+        let t3_wrong = t2_wrong.composed(with: link3)
+
+        // Verify the fixture is non-degenerate: the two orderings differ by > 1 px.
+        XCTAssertGreaterThan(abs(t2_want.tx - t2_wrong.tx), 1.0,
+            "t2_want and t2_wrong must differ by > 1 px — fixture is degenerate")
+
+        // Run accumulateLinks with exact links and ref=0.
+        let links: [Transform2D] = [.identity, link1, link2, link3]
+        let result = AffineAligner.accumulateLinks(links, referenceIndex: 0)
+
+        XCTAssertEqual(result[0], .identity)
+        // t1: both orderings agree on the first step (trivially identity.composed(with:) = itself).
+        XCTAssertEqual(result[1].tx, t1_want.tx, accuracy: 1e-4, "t1 tx")
+
+        // t2: correct = link2 ∘ link1; wrong = link1 ∘ link2 → diff = 1.1 px.
+        XCTAssertEqual(result[2].tx, t2_want.tx, accuracy: 1e-4,
+            "t2 tx must be link2∘link1 not link1∘link2 (catches transposed loop)")
+        XCTAssertNotEqual(result[2].tx, t2_wrong.tx, "t2 correct and wrong must be distinguishable")
+
+        // t3: accumulated error grows further.
+        XCTAssertEqual(result[3].tx, t3_want.tx, accuracy: 1e-4,
+            "t3 tx must follow correct composition chain")
     }
 }
