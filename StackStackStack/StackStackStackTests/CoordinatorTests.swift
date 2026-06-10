@@ -258,4 +258,44 @@ final class CoordinatorTests: XCTestCase {
         await coord.awaitProcessing()
         XCTAssertEqual(try XCTUnwrap(store.loadAll().first).encoderFormat, .jpeg)
     }
+
+    // MARK: - Task 5: Photos auto-export
+
+    @MainActor
+    func testPhotosExportRunsOnlyWhenEnabled() async throws {
+        let exported = ExportLog()
+        let (coord, _) = makeCoordinator()
+        coord.photosExporter = { data, _ in await exported.record(data.count) }
+        await coord.shoot()                       // saveToPhotosEnabled defaults to false
+        await coord.awaitProcessing()
+        let countDisabled = await exported.count
+        XCTAssertEqual(countDisabled, 0, "no export when the toggle is off")
+        coord.saveToPhotosEnabled = true
+        await coord.shoot()
+        await coord.awaitProcessing()
+        try await Task.sleep(nanoseconds: 200_000_000)   // export is fire-and-forget
+        let countEnabled = await exported.count
+        XCTAssertEqual(countEnabled, 1, "one export per save when enabled")
+        XCTAssertNil(coord.photosExportNote)
+    }
+
+    @MainActor
+    func testPhotosExportFailureIsNonBlocking() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.saveToPhotosEnabled = true
+        coord.photosExporter = { _, _ in throw CaptureError.busy }   // any error
+        await coord.shoot()
+        await coord.awaitProcessing()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(try store.loadAll().count, 1, "in-app save unaffected")
+        XCTAssertNotNil(coord.photosExportNote, "failure surfaces as a note, not an error")
+        XCTAssertNil(coord.lastError)
+    }
+}
+
+// MARK: - Helpers
+
+private actor ExportLog {
+    private(set) var count = 0
+    func record(_ n: Int) { count += 1 }
 }

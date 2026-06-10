@@ -179,7 +179,7 @@ struct CaptureView: View {
             } else if let err = coordinator.lastError {
                 Text("Failed: \(err)").foregroundColor(.red).multilineTextAlignment(.center)
             } else if coordinator.lastResultJPEG != nil {
-                Text("Saved ✓")
+                Text(coordinator.photosExportNote.map { "Saved ✓ · \($0)" } ?? "Saved ✓")
             } else {
                 Text("Ready")
             }

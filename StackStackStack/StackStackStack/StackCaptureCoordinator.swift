@@ -45,6 +45,12 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Library/encode format for new captures. Kept in sync from AppSettings by the app root —
     /// the coordinator stays ignorant of the settings object. Snapshotted at shutter press. (spec §4)
     var exportFormat: ImageEncoder.Format = .jpeg
+    /// Mirror saves into the system photo library (Settings toggle; synced by the app root). (spec §5)
+    var saveToPhotosEnabled = false
+    /// The export function — injectable so tests don't touch the real photo library. (spec §5)
+    var photosExporter: @Sendable (Data, ImageEncoder.Format) async throws -> Void = PhotoLibraryExporter.export
+    /// Non-blocking note when a Photos export fails (the in-app save already succeeded). (spec §5)
+    @Published private(set) var photosExportNote: String?
     /// Handheld-steadiness tracker for the long-exposure looks; observed by the capture overlay and
     /// read by the capture gate. (design 2026-06-07 §8)
     let steadiness = MotionSteadiness()
@@ -95,10 +101,12 @@ final class StackCaptureCoordinator: ObservableObject {
         guard !isBusy else { return }   // reject a rapid double-tap, and a shot during the background stack
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
         let format = self.exportFormat       // capture the format at shutter-press time
+        let exportToPhotos = self.saveToPhotosEnabled   // snapshot the toggle at shutter-press time
         // UIDevice.current.orientation is main-thread-only; safe here (coordinator is @MainActor, shoot runs on it).
         let orientationTurns = CaptureOrientation.quarterTurns(for: UIDevice.current.orientation)
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
+        photosExportNote = nil               // clear any prior export failure note
         aeAfLocked = false                   // a long-press lock is superseded once a shot begins
         let recipe = makeRecipe(for: mode)
         isCapturing = true
@@ -131,7 +139,8 @@ final class StackCaptureCoordinator: ObservableObject {
         }
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
         guard !frames.isEmpty else { lastError = "No frames were captured."; return }
-        enqueueProcessing(frames: frames, mode: mode, format: format, orientationQuarterTurns: orientationTurns)
+        enqueueProcessing(frames: frames, mode: mode, format: format,
+                          orientationQuarterTurns: orientationTurns, exportToPhotos: exportToPhotos)
     }
 
     /// Clear the on-screen result preview, returning the capture screen to the live viewfinder.
@@ -172,7 +181,8 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Queue develop→align→stack→encode→save behind any earlier job (serial), running the heavy work
     /// off the MainActor, then publish the result. The shutter stays free meanwhile.
     private func enqueueProcessing(frames: [RawSensorFrame], mode: StackMode,
-                                   format: ImageEncoder.Format, orientationQuarterTurns: Int) {
+                                   format: ImageEncoder.Format, orientationQuarterTurns: Int,
+                                   exportToPhotos: Bool) {
         processingCount += 1
         let token = CancellationToken()
         activeTokens.append(token)
@@ -210,6 +220,14 @@ final class StackCaptureCoordinator: ObservableObject {
                 // `lastResultJPEG` keeps its historical name; it stores display bytes — ImageIO decodes both JPEG and HEIC.
                 self.lastResultJPEG = encoded.data
                 self.lastSavedID = saved.id
+                if exportToPhotos {
+                    let exporter = self.photosExporter
+                    let payload = encoded
+                    Task { [weak self] in   // fire-and-forget; never blocks or fails the in-app save
+                        do { try await exporter(payload.data, payload.format) }
+                        catch { await MainActor.run { self?.photosExportNote = "Photos export failed — check Settings ▸ Privacy" } }
+                    }
+                }
             } catch is CancellationError {
                 return                                             // discarded mid-stack — not an error
             } catch {
