@@ -108,6 +108,9 @@ protocol CaptureService {
     /// `AVCaptureVideoPreviewLayer.captureDevicePointConverted`). `lock` (long-press) holds AF/AE.
     /// Device-only; the default below makes it a no-op for callers without a camera. (design tap-to-focus §3.2)
     func setFocusExposure(atDevicePoint point: CGPoint, lock: Bool)
+    /// Whether the device can step lens position for a Depth focus sweep (manual-focus hardware).
+    /// Drives Depth-chip gating in the UI. (spec 2026-06-10 §5.4)
+    var supportsDepthOfField: Bool { get }
 }
 
 extension CaptureService {
@@ -121,6 +124,7 @@ extension CaptureService {
     }
 
     func setFocusExposure(atDevicePoint point: CGPoint, lock: Bool) { }   // no-op unless a device overrides it
+    var supportsDepthOfField: Bool { true }   // overridden by the device service after configuring
 }
 
 extension StackMode {

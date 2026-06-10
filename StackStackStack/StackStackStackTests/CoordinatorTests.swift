@@ -207,4 +207,34 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(coord.capturedCount, 8, "counter reaches the captured frame count")
         await coord.awaitProcessing()
     }
+
+    @MainActor
+    func testDepthShootRoutesToFocusStackerAndSaves() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .depthOfField
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNil(coord.lastError)
+        XCTAssertNotNil(coord.lastResultJPEG)
+        let record = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(record.mode, "depthOfField")
+        XCTAssertEqual(record.frameCount, 10, "Depth default is a 10-bracket sweep")
+    }
+
+    @MainActor
+    func testDepthHonoursProFrameCount() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .depthOfField
+        coord.pro = ProControls(frameCount: 4)
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertEqual(try store.loadAll().first?.frameCount, 4)
+    }
+
+    @MainActor
+    func testSupportsDepthIsTrueWithTheFake() async {
+        let (coord, _) = makeCoordinator()
+        _ = await coord.startPreview()
+        XCTAssertTrue(coord.supportsDepth, "the fake always supports a focus sweep")
+    }
 }
