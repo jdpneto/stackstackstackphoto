@@ -88,11 +88,12 @@ struct PhotoDetailView: View {
     private func openEditor() {
         let id = record.id
         let lib = store
+        let fmt = record.encoderFormat   // the record's own format (spec §4: never the current setting)
         Task {
             let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, ImageAdjustments, Data?)? in
                 guard let data = lib.originalData(for: id) else { return nil }
                 let adj = lib.adjustments(for: id)
-                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200)
+                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200, format: fmt)
                 return (data, adj, prev)
             }.value
             guard let (data, adj, prevData) = loaded else { return }
@@ -107,13 +108,14 @@ struct PhotoDetailView: View {
         guard !rotating else { return }
         rotating = true
         let id = record.id, lib = store
+        let fmt = record.encoderFormat   // the record's own format (spec §4: never the current setting)
         Task {
             let result: (ImageAdjustments, Data)? = await Task.detached(priority: .userInitiated) {
                 // originalData and adjustments are safe to read off the main thread (file I/O only).
                 guard let original = lib.originalData(for: id) else { return nil }
                 var adj = lib.adjustments(for: id)
                 adj.quarterTurns += delta   // ImageAdjustments normalizes into 0…3 via its didSet
-                guard let rendered = ResultRenderer.render(originalJPEG: original, adjustments: adj, quality: 0.95)
+                guard let rendered = ResultRenderer.render(originalJPEG: original, adjustments: adj, quality: 0.95, format: fmt)
                 else { return nil }
                 return (adj, rendered)
             }.value

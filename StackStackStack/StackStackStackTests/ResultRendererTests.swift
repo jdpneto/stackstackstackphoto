@@ -64,4 +64,16 @@ final class ResultRendererTests: XCTestCase {
         let props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
         XCTAssertNil(props[kCGImagePropertyGPSDictionary], "rendered result must carry no GPS metadata")
     }
+
+    func testRenderInHEICProducesDecodableHEIC() throws {
+        // Build a small grey JPEG as the source (the original is always stored in the record's format,
+        // but we exercise the format param with a JPEG source decoded then re-encoded as HEIC).
+        let grey = PixelImage(width: 4, height: 4, fill: SIMD3<Float>(0.25, 0.25, 0.25))
+        let rgba = OutputTransform.encodeSRGB8(grey)
+        let original = try ImageEncoder.encode(rgba8: rgba, width: 4, height: 4, format: .jpeg, quality: 1.0)
+        let out = try XCTUnwrap(ResultRenderer.render(originalJPEG: original, adjustments: .identity,
+                                                      quality: 0.9, format: .heic))
+        XCTAssertNotNil(ImageDecoder.rgba8(from: out, maxPixel: nil), "HEIC output must decode")
+        XCTAssertNotEqual(out.prefix(3), Data([0xFF, 0xD8, 0xFF]), "must not be JPEG magic bytes")
+    }
 }

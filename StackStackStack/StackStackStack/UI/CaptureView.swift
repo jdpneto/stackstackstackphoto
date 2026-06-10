@@ -108,7 +108,9 @@ struct CaptureView: View {
             let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, ImageAdjustments, Data?)? in
                 guard let data = lib.originalData(for: id) else { return nil }
                 let adj = lib.adjustments(for: id)
-                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200)
+                // Use the record's own format for the preview (spec §4: WYSIWYG; never the current setting).
+                let fmt = lib.record(for: id)?.encoderFormat ?? .jpeg
+                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200, format: fmt)
                 return (data, adj, prev)
             }.value
             guard let (data, adj, prevData) = loaded else { return }

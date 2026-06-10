@@ -18,6 +18,9 @@ struct EditorView: View {
     @State private var isSaving = false
     @State private var saveError = false
 
+    /// The record's own format — renders use THIS, never the current setting (spec §4).
+    private var recordFormat: ImageEncoder.Format { store.record(for: recordId)?.encoderFormat ?? .jpeg }
+
     /// Adjustments + an initial downscaled preview are loaded OFF the main thread by the presenter
     /// and passed in, so the editor's init/body do no synchronous disk reads or full-res decodes.
     init(originalJPEG: Data, initialAdjustments: ImageAdjustments, initialPreview: UIImage?,
@@ -83,10 +86,10 @@ struct EditorView: View {
         renderTask?.cancel()
         generation += 1
         let gen = generation
-        let current = adj, jpeg = originalJPEG
+        let current = adj, jpeg = originalJPEG, fmt = recordFormat
         renderTask = Task {
             let data = await Task.detached(priority: .userInitiated) {
-                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200)
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200, format: fmt)
             }.value
             // Drop a stale render: a newer schedulePreview (higher generation) or a cancel supersedes it.
             if Task.isCancelled || gen != generation { return }
@@ -97,10 +100,10 @@ struct EditorView: View {
     private func save() {
         guard !isSaving else { return }   // reject a re-entrant Save while one is in flight
         isSaving = true
-        let current = adj, jpeg = originalJPEG, theStore = store, id = recordId
+        let current = adj, jpeg = originalJPEG, theStore = store, id = recordId, fmt = recordFormat
         Task {
             let rendered = await Task.detached(priority: .userInitiated) {
-                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.95)
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.95, format: fmt)
             }.value
             isSaving = false
             guard let rendered else { saveError = true; return }   // don't claim success on a failed render
