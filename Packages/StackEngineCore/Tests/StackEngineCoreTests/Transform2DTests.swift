@@ -34,6 +34,7 @@ final class Transform2DTests: XCTestCase {
 
     func testComposedWithIdentityIsUnchanged() {
         let t = Transform2D.similarity(scale: 1.04, rotation: 0.02, tx: 2, ty: -1)
+        // exact ==: multiplying by exact 1.0/0.0 is lossless in IEEE — don't weaken to tolerances.
         XCTAssertEqual(t.composed(with: .identity), t)
         XCTAssertEqual(Transform2D.identity.composed(with: t), t)
     }

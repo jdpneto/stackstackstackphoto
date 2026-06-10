@@ -26,19 +26,26 @@ public enum AffineAligner {
     /// `robustClip` (when set) caps each pixel's squared luma residual, so a region that moves
     /// differently from the global motion — a person/video in a handheld scene — can't pull the
     /// estimate off the static background it should lock onto. nil = plain SSD (the DoF path).
+    /// `translationHint` seeds the coarsest-level optimizer (before the integer translation search),
+    /// measured in pixels at the finest (input) resolution; useful when the caller has a robust
+    /// prior on translation (e.g. from a robust-SSD pre-pass) that defeats a plain-SSD search.
     public static func estimate(reference ref: PixelImage, moving mov: PixelImage,
-                                translationSearch: Int = 8, robustClip: Float? = nil) -> Transform2D {
+                                translationSearch: Int = 8, robustClip: Float? = nil,
+                                translationHint: (Float, Float)? = nil) -> Transform2D {
         precondition(ref.width == mov.width && ref.height == mov.height)
         let refPyr = ImagePyramid.gaussian(ref, minSize: 24)
         let movPyr = ImagePyramid.gaussian(mov, minSize: 24)
         let levels = refPyr.count
-        var s: Float = 1, r: Float = 0, tx: Float = 0, ty: Float = 0
+        var s: Float = 1, r: Float = 0
+        var tx: Float = (translationHint?.0 ?? 0) / Float(1 << (levels - 1))
+        var ty: Float = (translationHint?.1 ?? 0) / Float(1 << (levels - 1))
         for lvl in stride(from: levels - 1, through: 0, by: -1) {   // coarsest → finest
             let rL = Luma.luminance(refPyr[lvl]), mL = Luma.luminance(movPyr[lvl])
             let lw = refPyr[lvl].width, lh = refPyr[lvl].height
+            // Only run the integer translation search when there is no caller-provided hint.
+            let tInit = (translationHint == nil && lvl == levels - 1) ? translationSearch : 0
             (s, r, tx, ty) = refine(rL, mL, width: lw, height: lh, s: s, r: r, tx: tx, ty: ty,
-                                    translationInit: lvl == levels - 1 ? translationSearch : 0,
-                                    robustClip: robustClip)
+                                    translationInit: tInit, robustClip: robustClip)
             if lvl > 0 { tx *= 2; ty *= 2 }   // propagate translation to the next finer level
         }
         return .similarity(scale: s, rotation: r, tx: tx, ty: ty)
@@ -107,6 +114,111 @@ public enum AffineAligner {
         return sum / Float(w * h)
     }
 
+    // MARK: - Chain alignment for focus sweeps (spec 2026-06-10 §4.2)
+
+    /// Chain-align a focus sweep: estimate a similarity link between each ADJACENT pair — whose
+    /// blur is nearly identical, so the SSD cost is valid there, unlike a sharp-vs-defocused
+    /// direct-to-reference fit (the documented spurious-warp failure) — validate each link against
+    /// `bounds`, and compose links outward from `referenceIndex`.
+    ///
+    /// Returns one transform per frame mapping reference coords → that frame's coords (identity at
+    /// the reference); `warp(frames[i], by: result[i])` aligns frame i. Frames MUST be in sweep
+    /// (focus) order — adjacency is what makes the links well-conditioned.
+    public static func alignChain(_ frames: [PixelImage], referenceIndex: Int,
+                                  bounds: ChainBounds = .default) -> [Transform2D] {
+        precondition(frames.indices.contains(referenceIndex), "referenceIndex out of range")
+        var transforms = [Transform2D](repeating: .identity, count: frames.count)
+        // Up the sweep: link maps frame[i-1] coords → frame[i] coords.
+        for i in (referenceIndex + 1)..<frames.count {
+            let link = boundedLink(reference: frames[i - 1], moving: frames[i], bounds: bounds)
+            transforms[i] = link.composed(with: transforms[i - 1])
+        }
+        // Down the sweep: roles swapped so the link maps frame[i+1] coords → frame[i] coords.
+        for i in stride(from: referenceIndex - 1, through: 0, by: -1) {
+            let link = boundedLink(reference: frames[i + 1], moving: frames[i], bounds: bounds)
+            transforms[i] = link.composed(with: transforms[i + 1])
+        }
+        return transforms
+    }
+
+    /// One chain link: estimate the moving→reference similarity on a reduced copy (cheap; matches
+    /// the Pipeline's estimate-small/scale-translation-up pattern), then accept it only if it is
+    /// physically plausible for one focus step. An implausible fit is a blur difference posing as
+    /// warp — re-estimate translation-only, which cannot smear detail.
+    private static func boundedLink(reference ref: PixelImage, moving mov: PixelImage,
+                                    bounds: ChainBounds) -> Transform2D {
+        let (refSmall, factor) = reduceForEstimate(ref)
+        let (movSmall, _) = reduceForEstimate(mov)
+        // Pre-compute a robust translation so the Hooke–Jeeves optimizer starts at the right basin.
+        // Plain-SSD translation search can be pulled toward focal-band alignment (band k+1 aligning
+        // with band k) rather than handheld-drift correction; robust SSD suppresses that.
+        let robustShift = robustTranslation(reference: refSmall, moving: movSmall,
+                                            searchRange: 8, robustClip: bounds.robustClip)
+        let hint: (Float, Float) = (Float(robustShift.dx), Float(robustShift.dy))
+        // Use robust clip + the robust translation hint so the optimizer starts in the right basin.
+        let t = estimate(reference: refSmall, moving: movSmall, robustClip: bounds.robustClip,
+                         translationHint: hint)
+        let scale = (t.a * t.a + t.c * t.c).squareRoot()
+        let rotation = atan2(t.c, t.a)
+        let translation = (t.tx * t.tx + t.ty * t.ty).squareRoot()
+        let longEdge = Float(max(refSmall.width, refSmall.height))
+        if abs(scale - 1) <= bounds.maxScaleDelta,
+           abs(rotation) <= bounds.maxRotationRadians,
+           translation <= bounds.maxTranslationFraction * longEdge {
+            return Transform2D(a: t.a, b: t.b, c: t.c, d: t.d, tx: t.tx * factor, ty: t.ty * factor)
+        }
+        // Scale or rotation is implausible — fall back to robust translation-only (no smearing).
+        return .similarity(scale: 1, rotation: 0,
+                           tx: Float(robustShift.dx) * factor, ty: Float(robustShift.dy) * factor)
+    }
+
+    /// Integer translation minimising mean robust-SSD (per-pixel residuals capped at `clip`),
+    /// so in-focus/out-of-focus mismatches cannot pull the estimate away from the common background
+    /// signal. Falls back to plain SSD when `clip` is nil.
+    private static func robustTranslation(reference ref: PixelImage, moving mov: PixelImage,
+                                          searchRange r: Int, robustClip clip: Float?) -> Translation {
+        guard let clip else {
+            return Alignment.estimateTranslation(reference: ref, moving: mov, searchRange: r)
+        }
+        let w = ref.width, h = ref.height
+        let rl = Luma.luminance(ref), ml = Luma.luminance(mov)
+        var best = Translation(dx: 0, dy: 0)
+        var bestCost = Float.infinity
+        for mag in 0...r {
+            for dy in -mag...mag {
+                for dx in -mag...mag {
+                    guard abs(dx) == mag || abs(dy) == mag else { continue }
+                    var cost: Float = 0; var count: Float = 0
+                    let yStart = max(0, -dy), yEnd = min(h, h - dy)
+                    let xStart = max(0, -dx), xEnd = min(w, w - dx)
+                    if yStart >= yEnd || xStart >= xEnd { continue }
+                    for y in yStart..<yEnd {
+                        for x in xStart..<xEnd {
+                            let d = rl[y * w + x] - ml[(y + dy) * w + (x + dx)]
+                            cost += Swift.min(d * d, clip)
+                            count += 1
+                        }
+                    }
+                    let mean = cost / count
+                    if mean < bestCost { bestCost = mean; best = Translation(dx: dx, dy: dy) }
+                }
+            }
+        }
+        return best
+    }
+
+    /// Halve until the long edge is within `maxEdge`; returns the reduced image and the factor to
+    /// scale a reduced-space translation back to input pixels (powers of 2 — exact).
+    private static func reduceForEstimate(_ img: PixelImage, maxEdge: Int = 512) -> (PixelImage, Float) {
+        var out = img
+        var factor: Float = 1
+        while max(out.width, out.height) > maxEdge {
+            out = ImagePyramid.reduce(out)
+            factor *= 2
+        }
+        return (out, factor)
+    }
+
     // MARK: - Private samplers (bilinear, edge-clamped)
 
     private static func sampleRGB(_ img: PixelImage, _ fxIn: Float, _ fyIn: Float) -> SIMD3<Float> {
@@ -137,4 +249,36 @@ public enum AffineAligner {
         let bot = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * tx
         return top + (bot - top) * ty
     }
+}
+
+/// Per-link plausibility bounds for `AffineAligner.alignChain`. Focus breathing between ADJACENT
+/// brackets is a small, monotonic magnification change, and the steadiness gate bounds handheld
+/// per-step motion — so a link estimate outside these is a spurious fit (a blur difference being
+/// "explained" by warp) and must not be trusted with scale/rotation. (spec 2026-06-10 §4.2)
+public struct ChainBounds: Sendable, Equatable {
+    /// Max |scale − 1| per step.
+    public var maxScaleDelta: Float
+    /// Max |rotation| per step (radians).
+    public var maxRotationRadians: Float
+    /// Max translation magnitude per step, as a fraction of the long edge.
+    public var maxTranslationFraction: Float
+    /// Per-pixel squared-residual cap passed to `AffineAligner.estimate` and the robust
+    /// translation pre-pass, so focus-blur mismatches between adjacent brackets cannot pull the
+    /// optimizer off the common background signal. 0.0001 clips pixels differing by > 0.01 in luma
+    /// — tight enough to suppress focal-band mismatches (amplitude diff ≈ 0.20) while letting
+    /// the common ramp/texture (per-pixel diff ≈ 0.001 for a 1-px shift) drive the estimate.
+    /// nil = plain SSD (no clipping).
+    public var robustClip: Float?
+
+    public init(maxScaleDelta: Float = 0.02,
+                maxRotationRadians: Float = Float.pi / 180,
+                maxTranslationFraction: Float = 0.015,
+                robustClip: Float? = 0.0001) {
+        self.maxScaleDelta = maxScaleDelta
+        self.maxRotationRadians = maxRotationRadians
+        self.maxTranslationFraction = maxTranslationFraction
+        self.robustClip = robustClip
+    }
+
+    public static let `default` = ChainBounds()
 }
