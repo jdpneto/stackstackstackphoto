@@ -112,6 +112,8 @@ protocol CaptureService {
     /// Whether the device can step lens position for a Depth focus sweep (manual-focus hardware).
     /// Drives Depth-chip gating in the UI. (spec 2026-06-10 §5.4)
     var supportsDepthOfField: Bool { get }
+    /// Whether the camera vends a Bayer RAW format the converter can decode (capability report).
+    var supportsRAWCapture: Bool { get }
 }
 
 extension CaptureService {
@@ -126,6 +128,7 @@ extension CaptureService {
 
     func setFocusExposure(atDevicePoint point: CGPoint, lock: Bool) { }   // no-op unless a device overrides it
     var supportsDepthOfField: Bool { true }   // overridden by the device service after configuring
+    var supportsRAWCapture: Bool { true }     // overridden by the device service after configuring
 }
 
 extension StackMode {

@@ -291,6 +291,15 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertNotNil(coord.photosExportNote, "failure surfaces as a note, not an error")
         XCTAssertNil(coord.lastError)
     }
+
+    // MARK: - Task 6: RAW capability probe
+
+    @MainActor
+    func testSupportsRAWIsTrueWithTheFake() async {
+        let (coord, _) = makeCoordinator()
+        _ = await coord.startPreview()
+        XCTAssertTrue(coord.supportsRAW)
+    }
 }
 
 // MARK: - Helpers

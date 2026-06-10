@@ -5,6 +5,8 @@ struct StackStackStackApp: App {
     // Owned once for the app's lifetime — constructing it in `body` would re-build/leak the
     // capture session on every view update.
     @StateObject private var coordinator = StackCaptureCoordinator(capture: StackStackStackApp.makeCaptureService())
+    @StateObject private var settings = AppSettings()
+    @State private var showOnboarding = false
 
     var body: some Scene {
         WindowGroup {
@@ -13,7 +15,20 @@ struct StackStackStackApp: App {
                     .tabItem { Label("Capture", systemImage: "camera") }
                 NavigationStack { GalleryView() }
                     .tabItem { Label("Gallery", systemImage: "photo.on.rectangle") }
+                NavigationStack {
+                    SettingsView(coordinator: coordinator, store: coordinator.library,
+                                 showOnboarding: $showOnboarding)
+                }
+                .tabItem { Label("Settings", systemImage: "gearshape") }
             }
+            .environmentObject(settings)
+            // The coordinator stays ignorant of AppSettings: the root mirrors the two prefs in.
+            .onAppear {
+                coordinator.exportFormat = settings.exportFormat
+                coordinator.saveToPhotosEnabled = settings.saveToPhotos
+            }
+            .onReceive(settings.$exportFormat) { coordinator.exportFormat = $0 }
+            .onReceive(settings.$saveToPhotos) { coordinator.saveToPhotosEnabled = $0 }
         }
     }
 

@@ -22,6 +22,9 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Whether the camera can run a Depth focus sweep (manual-focus hardware). Optimistic `true`
     /// until the preview configures the session; the UI disables the Depth chip when false.
     @Published private(set) var supportsDepth = true
+    /// Whether the camera vends Bayer RAW frames the engine can decode. Optimistic `true`
+    /// until the preview configures the session; displayed in the Settings capability report.
+    @Published private(set) var supportsRAW = true
     /// True while AF/AE are locked via a long-press on the preview (drives the "AE/AF LOCK" banner).
     @Published private(set) var aeAfLocked = false
     /// Live capture progress (drives the on-screen counter + countdown during the burst).
@@ -81,6 +84,7 @@ final class StackCaptureCoordinator: ObservableObject {
     func startPreview() async -> CALayer? {
         let layer = await capture.startPreview()
         supportsDepth = capture.supportsDepthOfField
+        supportsRAW = capture.supportsRAWCapture
         return layer
     }
 

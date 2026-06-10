@@ -56,6 +56,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private let maxFrameGateAttempts = 30        // ~3s: if a later frame can't get steady, end the burst
     private var sweepPositions: [Float] = []     // Depth: per-frame lens positions; empty = no sweep
     private var manualLensSupported = true       // probed at configure; optimistic until then
+    private var rawSupported = true              // probed at configure; optimistic until then
     // Touched only on sessionQueue.
     private var configured = false
     // Computed once at configure (sessionQueue), read when building each capture's settings. The
@@ -266,6 +267,9 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     self.configured = true
                     let lensSupported = dev.isLockingFocusWithCustomLensPositionSupported
                     self.stateQueue.async { self.manualLensSupported = lensSupported }
+                    let rawOK = self.output.availableRawPhotoPixelFormatTypes
+                        .contains(where: { RawFrameConverter.isSupportedBayerFormat($0) })
+                    self.stateQueue.async { self.rawSupported = rawOK }
                     // Bayer RAW must be vended by the configured output, else capture can't produce frames.
                     guard !self.output.availableRawPhotoPixelFormatTypes.isEmpty else {
                         throw CaptureError.noRawFormat
@@ -373,6 +377,8 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
 
     /// Manual-focus capability, probed when the session configures (spec 2026-06-10 §5.4).
     var supportsDepthOfField: Bool { stateQueue.sync { manualLensSupported } }
+    /// Bayer RAW capture capability, probed when the session configures.
+    var supportsRAWCapture: Bool { stateQueue.sync { rawSupported } }
 
     // MARK: - Completion (always on stateQueue)
 
