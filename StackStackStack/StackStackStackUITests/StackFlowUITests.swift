@@ -104,8 +104,13 @@ final class StackFlowUITests: XCTestCase {
         #endif
         let app = XCUIApplication()
         app.launch()
-        app.buttons["look-depthOfField"].tap()
-        app.buttons["shutter"].tap()
+
+        let depth = app.buttons["look-depthOfField"]
+        XCTAssertTrue(depth.waitForExistence(timeout: 10), "Depth look chip not found")
+        depth.tap()
+        let shutter = app.buttons["shutter"]
+        XCTAssertTrue(shutter.waitForExistence(timeout: 5), "shutter button not found")
+        shutter.tap()
         // Capture (10 fake brackets) + background focus stack — generous timeout for CI simulators.
         XCTAssertTrue(app.staticTexts["Saved ✓"].waitForExistence(timeout: 60),
                       "Depth shoot must produce a saved stack")
