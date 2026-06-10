@@ -18,8 +18,8 @@ struct EditorView: View {
     @State private var isSaving = false
     @State private var saveError = false
 
-    /// The record's own format — renders use THIS, never the current setting (spec §4).
-    private var recordFormat: ImageEncoder.Format { store.record(for: recordId)?.encoderFormat ?? .jpeg }
+    /// Resolved once: the record's format can't change while the editor is open.
+    private let recordFormat: ImageEncoder.Format
 
     /// Adjustments + an initial downscaled preview are loaded OFF the main thread by the presenter
     /// and passed in, so the editor's init/body do no synchronous disk reads or full-res decodes.
@@ -29,6 +29,7 @@ struct EditorView: View {
         self.recordId = recordId
         self.store = store
         self.onSaved = onSaved
+        self.recordFormat = store.record(for: recordId)?.encoderFormat ?? .jpeg
         _adj = State(initialValue: initialAdjustments)
         _preview = State(initialValue: initialPreview)
     }
