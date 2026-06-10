@@ -54,6 +54,8 @@ public enum Pipeline {
             let mask = MotionComposite.motionMask(aligned, lo: trailsMotionLo, hi: trailsMotionHi, smoothRadius: 2)
             return MotionComposite.blend(staticBase: base, effect: streaks, mask: mask)
         case .lowLightBoost:  return StackReducer.boostedMean(aligned, gain: StackReducer.defaultLowLightGain)
+        case .depthOfField:
+            preconditionFailure("Depth of Field is stacked by FocusStacker.allInFocus, not Pipeline.reduce — fix the caller's routing")
         }
     }
 

@@ -160,7 +160,9 @@ final class PipelineTests: XCTestCase {
             RawSensorFrame(width: w, height: h, mosaic: [UInt16](repeating: 600, count: w * h),
                            blackLevel: 64, whiteLevel: 1024, cfa: .rggb)
         }
-        for mode in StackMode.allCases {
+        // All modes except depthOfField (which routes to FocusStacker, not Pipeline.reduce).
+        let modesForPipeline = StackMode.allCases.filter { $0 != .depthOfField }
+        for mode in modesForPipeline {
             let result = Pipeline.reduce(frames, mode: mode)
             XCTAssertEqual(result.width, w, "\(mode)")
             XCTAssertEqual(result.height, h, "\(mode)")
