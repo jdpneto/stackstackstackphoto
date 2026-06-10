@@ -25,7 +25,7 @@ public struct Transform2D: Equatable, Sendable {
     }
 
     /// The map that applies `other` FIRST, then `self`: result.apply(p) == self.apply(other.apply(p)).
-    /// Used to chain per-pair focus-sweep links into a frame's warp-to-reference (spec §4.2).
+    /// Used to chain per-pair focus-sweep links into a frame's warp-to-reference (handheld DoF spec 2026-06-10 §4.2).
     public func composed(with other: Transform2D) -> Transform2D {
         Transform2D(a: a * other.a + b * other.c,
                     b: a * other.b + b * other.d,
@@ -39,7 +39,7 @@ public struct Transform2D: Equatable, Sendable {
     /// (near-zero determinant) matrix would mean the estimator already failed, so trap loudly.
     public var inverse: Transform2D {
         let det = a * d - b * c
-        precondition(abs(det) > 1e-12, "non-invertible transform")
+        precondition(abs(det) > 1e-12, "non-invertible transform") // effectively det == 0 in Float; call sites are similarities with det ≈ 1
         let ia = d / det, ib = -b / det, ic = -c / det, id = a / det
         return Transform2D(a: ia, b: ib, c: ic, d: id,
                            tx: -(ia * tx + ib * ty), ty: -(ic * tx + id * ty))
