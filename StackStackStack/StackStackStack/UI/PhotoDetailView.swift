@@ -122,7 +122,7 @@ struct PhotoDetailView: View {
             do {
                 // applyEdit is a write (read-modify-write on index.json) — must be MainActor-confined.
                 // The enclosing Task inherits the MainActor from the SwiftUI action that called rotate(by:).
-                try lib.applyEdit(id: id, adjustments: adj, renderedJPEG: rendered)
+                try lib.applyEdit(id: id, adjustments: adj, rendered: rendered)
                 image = UIImage(data: rendered)   // reflect in the viewer
                 onChanged()                        // refresh the gallery
             } catch { /* transient render/save failure: leave the current image */ }

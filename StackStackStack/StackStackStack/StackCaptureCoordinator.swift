@@ -185,7 +185,7 @@ final class StackCaptureCoordinator: ObservableObject {
                                                    orientationQuarterTurns: orientationQuarterTurns,
                                                    shouldCancel: { token.isCancelled })
                 if token.isCancelled { return }                    // cancelled during processing → discard
-                let saved = try self.store.save(resultJPEG: jpeg, mode: mode.rawValue, frameCount: frames.count)
+                let saved = try self.store.save(result: jpeg, format: .jpeg, mode: mode.rawValue, frameCount: frames.count)
                 self.lastResultJPEG = jpeg
                 self.lastSavedID = saved.id
             } catch is CancellationError {

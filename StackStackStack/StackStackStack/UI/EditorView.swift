@@ -105,7 +105,7 @@ struct EditorView: View {
             isSaving = false
             guard let rendered else { saveError = true; return }   // don't claim success on a failed render
             do {
-                try theStore.applyEdit(id: id, adjustments: current, renderedJPEG: rendered)
+                try theStore.applyEdit(id: id, adjustments: current, rendered: rendered)
             } catch {
                 saveError = true
                 return
