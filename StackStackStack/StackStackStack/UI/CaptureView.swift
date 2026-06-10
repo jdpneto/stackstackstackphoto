@@ -368,6 +368,7 @@ extension StackMode {
         case .smoothMotion:   return "Smooth"
         case .lightTrails:    return "Trails"
         case .lowLightBoost:  return "Night"
+        case .depthOfField:   return "Depth"
         }
     }
 }
