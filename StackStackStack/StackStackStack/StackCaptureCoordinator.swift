@@ -54,6 +54,10 @@ final class StackCaptureCoordinator: ObservableObject {
     var photosExporter: @Sendable (Data, ImageEncoder.Format) async throws -> Void = PhotoLibraryExporter.export
     /// Non-blocking note when a Photos export fails (the in-app save already succeeded). (spec §5)
     @Published private(set) var photosExportNote: String?
+    /// Injectable encode — tests can swap this to force an encoder failure and exercise the HEIC→JPEG
+    /// fallback path without touching the real ImageEncoder. (spec §8)
+    var encodeImage: @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data =
+        { try ImageEncoder.encode(rgba8: $0, width: $1, height: $2, format: $3, quality: $4) }
     /// Handheld-steadiness tracker for the long-exposure looks; observed by the capture overlay and
     /// read by the capture gate. (design 2026-06-07 §8)
     let steadiness = MotionSteadiness()
@@ -106,6 +110,7 @@ final class StackCaptureCoordinator: ObservableObject {
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
         let format = self.exportFormat       // capture the format at shutter-press time
         let exportToPhotos = self.saveToPhotosEnabled   // snapshot the toggle at shutter-press time
+        let encode = self.encodeImage        // snapshot the encode hook at shutter-press time
         // UIDevice.current.orientation is main-thread-only; safe here (coordinator is @MainActor, shoot runs on it).
         let orientationTurns = CaptureOrientation.quarterTurns(for: UIDevice.current.orientation)
         lastError = nil
@@ -144,7 +149,8 @@ final class StackCaptureCoordinator: ObservableObject {
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
         guard !frames.isEmpty else { lastError = "No frames were captured."; return }
         enqueueProcessing(frames: frames, mode: mode, format: format,
-                          orientationQuarterTurns: orientationTurns, exportToPhotos: exportToPhotos)
+                          orientationQuarterTurns: orientationTurns, exportToPhotos: exportToPhotos,
+                          encode: encode)
     }
 
     /// Clear the on-screen result preview, returning the capture screen to the live viewfinder.
@@ -186,7 +192,8 @@ final class StackCaptureCoordinator: ObservableObject {
     /// off the MainActor, then publish the result. The shutter stays free meanwhile.
     private func enqueueProcessing(frames: [RawSensorFrame], mode: StackMode,
                                    format: ImageEncoder.Format, orientationQuarterTurns: Int,
-                                   exportToPhotos: Bool) {
+                                   exportToPhotos: Bool,
+                                   encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) {
         processingCount += 1
         let token = CancellationToken()
         activeTokens.append(token)
@@ -206,7 +213,8 @@ final class StackCaptureCoordinator: ObservableObject {
                 do {
                     let data = try await Self.makeResult(from: frames, mode: mode, format: format,
                                                          orientationQuarterTurns: orientationQuarterTurns,
-                                                         shouldCancel: { token.isCancelled })
+                                                         shouldCancel: { token.isCancelled },
+                                                         encode: encode)
                     encoded = (data, format)
                 } catch is CancellationError {
                     return                                         // cancellation must NOT trigger the JPEG retry
@@ -215,7 +223,8 @@ final class StackCaptureCoordinator: ObservableObject {
                     // HEIC encoder hiccup → fall back to JPEG and stamp the record accordingly.
                     let data = try await Self.makeResult(from: frames, mode: mode, format: .jpeg,
                                                          orientationQuarterTurns: orientationQuarterTurns,
-                                                         shouldCancel: { token.isCancelled })
+                                                         shouldCancel: { token.isCancelled },
+                                                         encode: encode)
                     encoded = (data, .jpeg)
                 }
                 if token.isCancelled { return }                    // cancelled during processing → discard
@@ -269,7 +278,8 @@ final class StackCaptureCoordinator: ObservableObject {
     nonisolated private static func makeResult(from frames: [RawSensorFrame], mode: StackMode,
                                                format: ImageEncoder.Format,
                                                orientationQuarterTurns: Int,
-                                               shouldCancel: @escaping @Sendable () -> Bool) async throws -> Data {
+                                               shouldCancel: @escaping @Sendable () -> Bool,
+                                               encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) async throws -> Data {
         try await Task.detached(priority: .userInitiated) {
             let result: PixelImage
             if mode.isLongExposure {
@@ -299,8 +309,7 @@ final class StackCaptureCoordinator: ObservableObject {
             }
             let oriented = ImageGeometry.rotated(result, quarterTurns: orientationQuarterTurns)   // bake upright
             let rgba = OutputTransform.encodeSRGB8(oriented)
-            return try ImageEncoder.encode(rgba8: rgba, width: oriented.width, height: oriented.height,
-                                           format: format, quality: 0.95)
+            return try encode(rgba, oriented.width, oriented.height, format, 0.95)
         }.value
     }
 

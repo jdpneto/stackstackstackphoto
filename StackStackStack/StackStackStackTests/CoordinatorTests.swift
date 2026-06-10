@@ -249,6 +249,24 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(store.resultURL(for: rec).pathExtension, "heic")
         // The bytes really are HEIC: they decode, and re-encoding as HEIC is what produced them.
         XCTAssertNotNil(ImageDecoder.rgba8(from: try Data(contentsOf: store.resultURL(for: rec)), maxPixel: nil))
+        let bytes = try Data(contentsOf: store.resultURL(for: rec))
+        XCTAssertNotEqual(bytes.prefix(3), Data([0xFF, 0xD8, 0xFF]), "saved bytes must not be JPEG magic when the record says HEIC")
+    }
+
+    @MainActor
+    func testHEICEncodeFailureFallsBackToJPEG() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.exportFormat = .heic
+        coord.encodeImage = { rgba, w, h, format, quality in
+            if format == .heic { throw ImageEncoderError.finalizeFailed }   // simulate an encoder hiccup
+            return try ImageEncoder.encode(rgba8: rgba, width: w, height: h, format: format, quality: quality)
+        }
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNil(coord.lastError, "fallback must not surface an error")
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(rec.encoderFormat, .jpeg, "record stamped with the format actually encoded")
+        XCTAssertEqual(try Data(contentsOf: store.resultURL(for: rec)).prefix(3), Data([0xFF, 0xD8, 0xFF]))
     }
 
     @MainActor
