@@ -2,18 +2,13 @@ import XCTest
 
 final class StackFlowUITests: XCTestCase {
 
-    /// Onboarding may cover the UI on a fresh simulator install — dismiss it before flow tests.
-    private func dismissOnboardingIfPresent(_ app: XCUIApplication) {
-        if app.buttons["onboarding-skip"].waitForExistence(timeout: 2) { app.buttons["onboarding-skip"].tap() }
-    }
-
     func testTapShutterProducesAStack() throws {
         #if !targetEnvironment(simulator)
         throw XCTSkip("Relies on the Simulator fake-capture path; the device camera path needs permissions and real hardware.")
         #endif
         let app = XCUIApplication()
+        app.launchArguments += ["-skipOnboarding"]
         app.launch()
-        dismissOnboardingIfPresent(app)
 
         let shutter = app.buttons["shutter"]
         XCTAssertTrue(shutter.waitForExistence(timeout: 10), "shutter button not found")
@@ -36,8 +31,8 @@ final class StackFlowUITests: XCTestCase {
         throw XCTSkip("Relies on the Simulator fake-capture path; the device camera path needs permissions and real hardware.")
         #endif
         let app = XCUIApplication()
+        app.launchArguments += ["-skipOnboarding"]
         app.launch()
-        dismissOnboardingIfPresent(app)
 
         let shutter = app.buttons["shutter"]
         XCTAssertTrue(shutter.waitForExistence(timeout: 10), "shutter button not found")
@@ -64,8 +59,8 @@ final class StackFlowUITests: XCTestCase {
         throw XCTSkip("Relies on the Simulator fake-capture path.")
         #endif
         let app = XCUIApplication()
+        app.launchArguments += ["-skipOnboarding"]
         app.launch()
-        dismissOnboardingIfPresent(app)
 
         // Capture one stack so the gallery isn't empty.
         let shutter = app.buttons["shutter"]
@@ -91,8 +86,9 @@ final class StackFlowUITests: XCTestCase {
         throw XCTSkip("Relies on the Simulator fake-capture path.")
         #endif
         let app = XCUIApplication()
+        app.launchArguments += ["-skipOnboarding"]
         app.launch()
-        dismissOnboardingIfPresent(app)
+
         let trails = app.buttons["look-lightTrails"]
         XCTAssertTrue(trails.waitForExistence(timeout: 10), "Trails look chip not found")
         trails.tap()
@@ -113,8 +109,8 @@ final class StackFlowUITests: XCTestCase {
         throw XCTSkip("Relies on the Simulator fake-capture path.")
         #endif
         let app = XCUIApplication()
+        app.launchArguments += ["-skipOnboarding"]
         app.launch()
-        dismissOnboardingIfPresent(app)
 
         let depth = app.buttons["look-depthOfField"]
         XCTAssertTrue(depth.waitForExistence(timeout: 10), "Depth look chip not found")
@@ -156,7 +152,8 @@ final class StackFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["shutter"].waitForExistence(timeout: 10), "shutter must appear after skip")
         app.terminate()
 
-        // Phase 2: relaunch without the reset arg — onboarding must NOT appear.
+        // Phase 2: relaunch without any args — hasSeenOnboarding persists from phase 1,
+        // so with the conditional-root change the app lands directly on Capture.
         app.launchArguments = []
         app.launch()
         XCTAssertTrue(app.buttons["shutter"].waitForExistence(timeout: 10))

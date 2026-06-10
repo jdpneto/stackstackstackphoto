@@ -35,7 +35,8 @@ struct OnboardingPage: Identifiable {
 struct OnboardingView: View {
     @EnvironmentObject private var settings: AppSettings
     @Binding var isPresented: Bool
-    @State private var cameraDenied = AVCaptureDevice.authorizationStatus(for: .video) == .denied
+    // Fix 3: recomputed on appear so the state is fresh if the user granted/denied between pages.
+    @State private var cameraDenied = false
 
     var body: some View {
         VStack {
@@ -68,33 +69,53 @@ struct OnboardingView: View {
                      line1: page.what, line2: page.when)
     }
 
+    // Fix 2: camera buttons live inside the scaffold footer slot so the inner bottom Spacer
+    // cannot push them off-screen on small devices (e.g. iPhone SE).
     private var cameraPage: some View {
-        VStack(spacing: 16) {
-            pageScaffold(symbol: "camera.fill", tint: .yellow, title: "One thing first",
-                         line1: "Stack Stack Stack is a camera — it needs camera access to shoot.",
-                         line2: "Nothing is captured until you press the shutter.")
-            if cameraDenied {
-                Button("Open Settings") {
-                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
-                }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Button("Enable Camera") {
-                    AVCaptureDevice.requestAccess(for: .video) { _ in
-                        Task { @MainActor in finish() }   // continue regardless of the answer
+        pageScaffold(symbol: "camera.fill", tint: .yellow, title: "One thing first",
+                     line1: "Stack Stack Stack is a camera — it needs camera access to shoot.",
+                     line2: "Nothing is captured until you press the shutter.") {
+            VStack(spacing: 12) {
+                if cameraDenied {
+                    Button("Open Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                     }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Enable Camera") {
+                        AVCaptureDevice.requestAccess(for: .video) { _ in
+                            Task { @MainActor in finish() }   // continue regardless of the answer
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("onboarding-enable-camera")
                 }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("onboarding-enable-camera")
+                Button("Done") { finish() }
+                    .foregroundColor(.secondary)
+                    .accessibilityIdentifier("onboarding-done")
             }
-            Button("Done") { finish() }
-                .foregroundColor(.secondary)
-                .accessibilityIdentifier("onboarding-done")
         }
+        // Fix 3: re-read the authorization status each time this page appears (the user may have
+        // granted or denied access while swiping through the earlier pages).
+        .onAppear { cameraDenied = AVCaptureDevice.authorizationStatus(for: .video) == .denied }
     }
+
+    // MARK: - Scaffold
+
+    // Fix 2: two overloads so the default (no footer) compiles without a @ViewBuilder default
+    // parameter (which is syntactically valid in Swift 5.9 but triggers a spurious warning on
+    // some Xcode 15 toolchains when the default is EmptyView). Welcome/lookCard callers use the
+    // no-footer overload; cameraPage uses the footer overload.
 
     private func pageScaffold(symbol: String, tint: Color, title: String,
                               line1: String, line2: String) -> some View {
+        pageScaffold(symbol: symbol, tint: tint, title: title,
+                     line1: line1, line2: line2) { EmptyView() }
+    }
+
+    private func pageScaffold<Footer: View>(symbol: String, tint: Color, title: String,
+                                            line1: String, line2: String,
+                                            @ViewBuilder footer: () -> Footer) -> some View {
         VStack(spacing: 20) {
             Spacer()
             ZStack {   // stylized stand-in for a sample shot; a real image can replace it later
@@ -107,6 +128,8 @@ struct OnboardingView: View {
             Text(title).font(.title).bold().foregroundColor(.white)
             Text(line1).multilineTextAlignment(.center).foregroundColor(.white.opacity(0.9))
             Text(line2).font(.callout).multilineTextAlignment(.center).foregroundColor(.white.opacity(0.6))
+            footer()
+                .padding(.top, 12)
             Spacer()
         }
         .padding(.horizontal, 32)
