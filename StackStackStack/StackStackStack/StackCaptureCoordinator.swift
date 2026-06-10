@@ -235,9 +235,10 @@ final class StackCaptureCoordinator: ObservableObject {
                                                       binnedDevelop: true, shouldCancel: shouldCancel)
             } else if mode == .depthOfField {
                 // Depth: develop all brackets at the managed depth resolution, then focus-stack.
-                // maxFrames follows the actual capture (the recipe already capped it). (spec §6)
+                // maxFrames follows the actual capture (the recipe already capped it). (spec 2026-06-10 §6)
                 let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
                                                          workingResolution: depthWorkingResolution)
+                if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
                 if shouldCancel() { throw CancellationError() }
                 guard let stacked = FocusStacker.allInFocus(
                     developed,
