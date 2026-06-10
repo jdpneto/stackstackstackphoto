@@ -1,16 +1,17 @@
 import simd
 
-/// End-to-end focus stacking: develop → downscale to the working resolution → (optionally) align
-/// each frame to the sharpest reference → per-pixel sharpness → selection weights → multiband blend
-/// → all-in-focus image (design §13.2). Returns nil for an empty input.
+/// End-to-end focus stacking: develop → downscale to the working resolution → chain-align the
+/// brackets to the sharpest reference → per-pixel sharpness → selection weights → multiband blend
+/// → all-in-focus image (design §13.2, spec 2026-06-10). Returns nil for an empty input.
 ///
-/// Alignment is **opt-in** (`DepthConfig.alignFrames`, default off) and **translation-only**: focus
-/// stacking is classically tripod-based, and a full-DOF SSD fit over focus brackets (whose content
-/// changes with focus) can lodge in a spurious warp that smears detail. Robust handheld focus-bracket
-/// alignment (a focus-invariant estimator) is a documented refinement before it is safe on real
-/// brackets; translation-only keeps the current path from distorting frames.
+/// Alignment is CHAIN alignment (`AffineAligner.alignChain`, default on): a direct similarity fit
+/// of a sharp frame against a defocused one lets the optimizer "explain" blur differences with a
+/// spurious warp that smears detail — the failure that originally shelved this look. Adjacent
+/// brackets share nearly identical blur, so estimating each link between neighbours and composing
+/// to the reference keeps every fit well-conditioned; implausible links degrade to translation-only.
 public enum FocusStacker {
-    /// All-in-focus composite from already-developed linear frames (all the same dimensions).
+    /// All-in-focus composite from already-developed linear frames (all the same dimensions),
+    /// in SWEEP ORDER (chain alignment depends on adjacency in focus).
     public static func allInFocus(_ images: [PixelImage], config: DepthConfig) -> PixelImage? {
         guard !images.isEmpty else { return nil }
         let frames = images.prefix(config.maxFrames).map { downscale($0, maxEdge: config.workingResolution) }
@@ -22,13 +23,13 @@ public enum FocusStacker {
         let reference = frames[refIdx]
         let refLuma = Luma.luminance(reference)
 
-        let aligned: [PixelImage] = config.alignFrames
-            ? frames.enumerated().map { i, f in
-                i == refIdx ? f : Alignment.warp(f, by: Alignment.estimateTranslation(
-                    referenceLuma: refLuma, movingLuma: Luma.luminance(f),
-                    width: reference.width, height: reference.height, searchRange: 16))
-              }
-            : frames
+        let aligned: [PixelImage]
+        if config.alignFrames {
+            let transforms = AffineAligner.alignChain(frames, referenceIndex: refIdx)
+            aligned = zip(frames, transforms).map { f, t in t == .identity ? f : AffineAligner.warp(f, by: t) }
+        } else {
+            aligned = frames
+        }
 
         let sharp = aligned.map { SharpnessMap.compute($0) }
         let weights = SelectionMap.weights(sharpness: sharp, guide: refLuma,
