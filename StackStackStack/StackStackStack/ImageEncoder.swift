@@ -6,8 +6,13 @@ import CoreGraphics
 enum ImageEncoderError: Error { case contextFailed, destinationFailed, finalizeFailed }
 
 enum ImageEncoder {
-    enum Format { case jpeg, heic
+    /// `String`-backed: raw values are persisted (AppSettings + StackRecord.format) — renaming a
+    /// case silently breaks stored preferences and library records.
+    enum Format: String, Sendable, Equatable {
+        case jpeg, heic
         var utType: UTType { self == .jpeg ? .jpeg : .heic }
+        /// The file extension library files use for this format.
+        var fileExtension: String { self == .jpeg ? "jpg" : "heic" }
     }
 
     /// Encode interleaved sRGB RGBA8 bytes into JPEG/HEIC data.
