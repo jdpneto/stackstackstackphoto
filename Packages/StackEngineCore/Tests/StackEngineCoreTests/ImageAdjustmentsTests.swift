@@ -24,4 +24,12 @@ final class ImageAdjustmentsTests: XCTestCase {
         XCTAssertEqual(adj.quarterTurns, 3)
         XCTAssertEqual(adj, ImageAdjustments(quarterTurns: 3), "equality stays coherent with the canonical value")
     }
+
+    func testBlendStrengthDefaultsToFullLookAndDecodesWhenMissing() throws {
+        XCTAssertEqual(ImageAdjustments.identity.blendStrength, 1)
+        // Sidecars written before the field existed must decode as full look.
+        let legacy = try JSONDecoder().decode(ImageAdjustments.self, from: Data("{}".utf8))
+        XCTAssertEqual(legacy.blendStrength, 1)
+        XCTAssertTrue(legacy.isIdentity)
+    }
 }

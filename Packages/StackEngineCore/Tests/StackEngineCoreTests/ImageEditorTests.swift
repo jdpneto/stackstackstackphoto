@@ -121,4 +121,37 @@ final class ImageEditorTests: XCTestCase {
         XCTAssertFalse(ImageAdjustments(quarterTurns: 1).isIdentity)
         XCTAssertTrue(ImageAdjustments(quarterTurns: 0).isIdentity)
     }
+
+    func testBlendLerpsTowardReferenceInLinearLight() {
+        let img = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(0.8, 0.8, 0.8))
+        let ref = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(0.2, 0.2, 0.2))
+        var adj = ImageAdjustments.identity
+        adj.blendStrength = 0.5
+        let out = ImageEditor.apply(adj, to: img, reference: ref)
+        XCTAssertEqual(out[3, 3].x, 0.5, accuracy: 1e-5, "α=0.5 is the linear midpoint")
+        adj.blendStrength = 0
+        XCTAssertEqual(ImageEditor.apply(adj, to: img, reference: ref)[3, 3].x, 0.2, accuracy: 1e-5)
+        adj.blendStrength = 1
+        XCTAssertEqual(ImageEditor.apply(adj, to: img, reference: ref)[3, 3].x, 0.8, accuracy: 1e-5)
+    }
+
+    func testBlendSkipsOnMissingOrMismatchedReference() {
+        let img = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(0.8, 0.8, 0.8))
+        var adj = ImageAdjustments.identity
+        adj.blendStrength = 0
+        XCTAssertEqual(ImageEditor.apply(adj, to: img, reference: nil)[3, 3].x, 0.8, accuracy: 1e-5)
+        let small = PixelImage(width: 4, height: 4, fill: SIMD3<Float>(0.2, 0.2, 0.2))
+        XCTAssertEqual(ImageEditor.apply(adj, to: img, reference: small)[3, 3].x, 0.8, accuracy: 1e-5,
+                       "dimension mismatch must skip the blend, never trap")
+    }
+
+    func testBlendAppliesBeforeTonal() {
+        // EV +1 on an α=0 blend must double the REFERENCE, proving lerp-first ordering.
+        let img = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(0.8, 0.8, 0.8))
+        let ref = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(0.2, 0.2, 0.2))
+        var adj = ImageAdjustments.identity
+        adj.blendStrength = 0
+        adj.exposureEV = 1
+        XCTAssertEqual(ImageEditor.apply(adj, to: img, reference: ref)[3, 3].x, 0.4, accuracy: 1e-4)
+    }
 }

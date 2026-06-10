@@ -25,10 +25,14 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
     public var quarterTurns: Int = 0 {  // 90°×k clockwise rotation, kept in 0…3 (gallery rotate)
         didSet { quarterTurns = ((quarterTurns % 4) + 4) % 4 }   // stays canonical on direct mutation (e.g. += 1)
     }
+    /// Look strength α: 1 = full look (today's result), 0 = the aligned reference frame; lerp
+    /// applied in linear light before geometry/tonal so the reference needs no separate geometry
+    /// pass. Missing from legacy sidecars → decoded as 1 (unchanged behaviour). (spec 2026-06-11 §3)
+    public var blendStrength: Float     // 0…1; 1 = identity (no blend)
 
     public init(exposureEV: Float = 0, contrast: Float = 0, temperature: Float = 0, tint: Float = 0,
                 shadows: Float = 0, highlights: Float = 0, straightenDegrees: Float = 0,
-                cropAspect: CropAspect = .original, quarterTurns: Int = 0) {
+                cropAspect: CropAspect = .original, quarterTurns: Int = 0, blendStrength: Float = 1) {
         self.exposureEV = exposureEV
         self.contrast = contrast
         self.temperature = temperature
@@ -38,6 +42,7 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
         self.straightenDegrees = straightenDegrees
         self.cropAspect = cropAspect
         self.quarterTurns = ((quarterTurns % 4) + 4) % 4
+        self.blendStrength = blendStrength
     }
 
     public static let identity = ImageAdjustments()
@@ -47,6 +52,9 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
     public var hasTonalAdjustments: Bool {
         exposureEV != 0 || contrast != 0 || temperature != 0 || tint != 0 || shadows != 0 || highlights != 0
     }
+
+    /// True when blendStrength is set below 1 — i.e. the lerp-toward-reference pass is needed.
+    public var hasBlend: Bool { blendStrength < 1 }
 
     // Back-compat: edit sidecars written before the new fields lack those keys — default them.
     public init(from decoder: Decoder) throws {
@@ -61,5 +69,6 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
         cropAspect = try c.decodeIfPresent(CropAspect.self, forKey: .cropAspect) ?? .original
         let rawTurns = try c.decodeIfPresent(Int.self, forKey: .quarterTurns) ?? 0
         quarterTurns = ((rawTurns % 4) + 4) % 4
+        blendStrength = try c.decodeIfPresent(Float.self, forKey: .blendStrength) ?? 1
     }
 }

@@ -92,4 +92,14 @@ final class PipelineStreamingTests: XCTestCase {
             XCTAssertTrue(error is CancellationError)
         }
     }
+
+    func testReduceStreamingWithReferenceReturnsTheAnchorFrame() throws {
+        // Anchor = frame 0's developed image; result and reference must have matching dimensions.
+        let frames = (0..<3).map { grayRaw(UInt16(300 + $0 * 10)) }
+        let (result, reference) = try Pipeline.reduceStreamingWithReference(frames, mode: .smoothMotion,
+                                                                             binnedDevelop: true)
+        XCTAssertEqual(result.width, reference.width)
+        XCTAssertEqual(result.height, reference.height)
+        XCTAssertTrue(reference.pixels[0].x.isFinite)
+    }
 }

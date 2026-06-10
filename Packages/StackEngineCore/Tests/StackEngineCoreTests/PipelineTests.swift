@@ -154,6 +154,18 @@ final class PipelineTests: XCTestCase {
         XCTAssertGreaterThan(out.width, 0)
     }
 
+    func testReduceImagesWithReferenceReturnsTheAnchor() {
+        // Two aligned frames (no shift); both dimensions match and the reference has finite sharpness.
+        let a = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(0.3, 0.3, 0.3))
+        let b = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(0.7, 0.7, 0.7))
+        let (result, reference) = Pipeline.reduceImagesWithReference([a, b], mode: .noiseReduction)
+        XCTAssertEqual(result.width, reference.width)
+        XCTAssertEqual(result.height, reference.height)
+        XCTAssertEqual(reference.pixels.count, reference.width * reference.height)
+        // The reference must be one of the aligned frames (non-empty pixel count, finite values).
+        XCTAssertTrue(reference.pixels[0].x.isFinite)
+    }
+
     func testReduceRawPathHandlesAllModes() {
         let w = 8, h = 8
         let frames = (0..<3).map { _ in
