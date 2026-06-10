@@ -196,30 +196,36 @@ struct CaptureView: View {
     }
 
     private var lookPicker: some View {
-        HStack(spacing: 8) {
-            ForEach(StackMode.allCases, id: \.self) { m in
-                Button {
-                    coordinator.mode = m   // the coordinator drops the stale result when the look changes
-                } label: {
-                    Text(m.shortLabel)
-                        .font(.caption)
-                        .fontWeight(coordinator.mode == m ? .bold : .regular)
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(coordinator.mode == m ? Color.white : Color.white.opacity(0.18))
-                        .foregroundColor(coordinator.mode == m ? .black : .white)
-                        .clipShape(Capsule())
+        VStack(spacing: 4) {
+            HStack(spacing: 8) {
+                ForEach(StackMode.allCases, id: \.self) { m in
+                    Button {
+                        coordinator.mode = m   // the coordinator drops the stale result when the look changes
+                    } label: {
+                        Text(m.shortLabel)
+                            .font(.caption)
+                            .fontWeight(coordinator.mode == m ? .bold : .regular)
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(coordinator.mode == m ? Color.white : Color.white.opacity(0.18))
+                            .foregroundColor(coordinator.mode == m ? .black : .white)
+                            .clipShape(Capsule())
+                    }
+                    .accessibilityIdentifier("look-\(m)")
+                    .disabled(coordinator.isBusy || (m == .depthOfField && !coordinator.supportsDepth))
                 }
-                .accessibilityIdentifier("look-\(m)")
-                .disabled(coordinator.isBusy)
+            }
+            if !coordinator.supportsDepth {
+                Text("Depth needs manual-focus hardware this camera doesn't have")
+                    .font(.caption2).foregroundColor(.white.opacity(0.7))
             }
         }
         .padding(.bottom, 8)
     }
 
     /// Two-circle steadiness guide: a fixed big ring + a small circle that drifts with device tilt;
-    /// green inside tolerance, red outside. Shown only while a long-exposure burst is capturing.
+    /// green inside tolerance, red outside. Shown while a long-exposure burst or Depth sweep is capturing.
     @ViewBuilder private var steadinessOverlay: some View {
-        if coordinator.isCapturing && coordinator.mode.isLongExposure {
+        if coordinator.isCapturing && coordinator.mode.usesSteadinessGate {
             GeometryReader { geo in
                 let big: CGFloat = 120, small: CGFloat = 36
                 // Constrain so the dot's EDGE stays inside the ring even at a diagonal max offset:
@@ -330,9 +336,19 @@ struct CaptureView: View {
                     optControl("Shutter", unit: "s",
                                binding: $coordinator.pro.shutterSeconds, range: 0.001...1, step: 0.001, defaultValue: 0.02) {
                                    String(format: "1/%.0f", 1 / max($0, 0.0001)) }
-                    optControl("Focus", unit: "",
-                               binding: $coordinator.pro.focus, range: 0...1, step: 0.01, defaultValue: 0.5) {
-                                   String(format: "%.2f", $0) }
+                    if coordinator.mode == .depthOfField {
+                        // The sweep owns lens position; Near/Far set its range (spec 2026-06-10 §6).
+                        optControl("Near", unit: "",
+                                   binding: $coordinator.pro.focusSweepNear, range: 0...1, step: 0.01,
+                                   defaultValue: 0) { String(format: "%.2f", $0) }
+                        optControl("Far", unit: "",
+                                   binding: $coordinator.pro.focusSweepFar, range: 0...1, step: 0.01,
+                                   defaultValue: 1) { String(format: "%.2f", $0) }
+                    } else {
+                        optControl("Focus", unit: "",
+                                   binding: $coordinator.pro.focus, range: 0...1, step: 0.01, defaultValue: 0.5) {
+                                       String(format: "%.2f", $0) }
+                    }
                 }
                 .padding(.horizontal, 24)
             }
