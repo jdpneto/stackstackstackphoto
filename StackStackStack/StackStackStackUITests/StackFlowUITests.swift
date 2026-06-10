@@ -97,4 +97,17 @@ final class StackFlowUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
     }
+
+    func testDepthLookProducesASavedStack() throws {
+        #if !targetEnvironment(simulator)
+        throw XCTSkip("Relies on the Simulator fake-capture path.")
+        #endif
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["look-depthOfField"].tap()
+        app.buttons["shutter"].tap()
+        // Capture (10 fake brackets) + background focus stack — generous timeout for CI simulators.
+        XCTAssertTrue(app.staticTexts["Saved ✓"].waitForExistence(timeout: 60),
+                      "Depth shoot must produce a saved stack")
+    }
 }
