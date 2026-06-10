@@ -22,4 +22,30 @@ final class Transform2DTests: XCTestCase {
         XCTAssertEqual(p.x, 0, accuracy: 1e-6)    // (1,0) rotated +90° → (0,1)
         XCTAssertEqual(p.y, 1, accuracy: 1e-6)
     }
+
+    func testComposedAppliesRightHandSideFirst() {
+        let scale = Transform2D.similarity(scale: 2, rotation: 0, tx: 0, ty: 0)
+        let shift = Transform2D.similarity(scale: 1, rotation: 0, tx: 3, ty: -1)
+        // scale ∘ shift: p → scale(shift(p)) = 2·(p + (3,−1))
+        let p = scale.composed(with: shift).apply(1, 1)
+        XCTAssertEqual(p.x, 8, accuracy: 1e-5)
+        XCTAssertEqual(p.y, 0, accuracy: 1e-5)
+    }
+
+    func testComposedWithIdentityIsUnchanged() {
+        let t = Transform2D.similarity(scale: 1.04, rotation: 0.02, tx: 2, ty: -1)
+        XCTAssertEqual(t.composed(with: .identity), t)
+        XCTAssertEqual(Transform2D.identity.composed(with: t), t)
+    }
+
+    func testInverseRoundTripsToIdentity() {
+        let t = Transform2D.similarity(scale: 1.04, rotation: 0.02, tx: 2, ty: -1)
+        let id = t.composed(with: t.inverse)
+        XCTAssertEqual(id.a, 1, accuracy: 1e-5)
+        XCTAssertEqual(id.b, 0, accuracy: 1e-5)
+        XCTAssertEqual(id.c, 0, accuracy: 1e-5)
+        XCTAssertEqual(id.d, 1, accuracy: 1e-5)
+        XCTAssertEqual(id.tx, 0, accuracy: 1e-4)
+        XCTAssertEqual(id.ty, 0, accuracy: 1e-4)
+    }
 }
