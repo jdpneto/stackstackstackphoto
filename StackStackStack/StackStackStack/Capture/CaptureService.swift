@@ -22,9 +22,10 @@ struct CaptureRecipe: Sendable, Equatable {
             self.steps = max(steps, 1)
         }
 
-        /// The per-frame lens positions, near → far inclusive.
+        /// The per-frame lens positions, near → far inclusive. A degenerate single-step sweep
+        /// shoots at `near` — the documented start of the range, not a surprise midpoint.
         var positions: [Float] {
-            guard steps > 1 else { return [(near + far) / 2] }
+            guard steps > 1 else { return [near] }
             return (0..<steps).map { near + (far - near) * Float($0) / Float(steps - 1) }
         }
     }

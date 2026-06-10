@@ -213,10 +213,9 @@ final class StackCaptureCoordinator: ObservableObject {
     /// frames to this before align/stack is the dominant speed + memory win (results stay sharp at
     /// screen/share sizes). A full-resolution Pro tier is a follow-up.
     nonisolated private static let managedWorkingResolution = 2400
-    /// Depth working resolution (long-edge px). Lower than the 2400 the other looks use: DoF holds
-    /// ALL brackets + Laplacian pyramids + weight masks at once (~700 MB at 1500 px for 10 brackets
-    /// vs ~1.8 GB at 2400 px, which flirts with the ~3 GB jetsam limit). (spec 2026-06-10 §4.4)
-    nonisolated private static let depthWorkingResolution = 1500
+    /// Depth working resolution (long-edge px) — the engine's managed preset is the single source
+    /// of truth (its comment carries the memory rationale); don't restate the number here.
+    nonisolated private static let depthWorkingResolution = DepthConfig.auto.workingResolution
 
     /// DEBUG: dump the developed frames (the exact alignment input) for one capture so the handheld
     /// registration can be debugged offline on real data. Off for release; remove before merge.

@@ -346,6 +346,10 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     /// (AE/AF lock). Runs on `sessionQueue`; every step capability-guarded. (design tap-to-focus §3.2)
     func setFocusExposure(atDevicePoint point: CGPoint, lock: Bool) {
         sessionQueue.async {
+            // A stale tap can land here after a burst began (the MainActor gate races the gesture by
+            // one runloop turn). Mid-burst it would fight the locked focus — and a Depth sweep's
+            // per-frame lens steps — so drop it; tapping is a viewfinder-only affordance.
+            guard self.stateQueue.sync(execute: { self.continuation == nil }) else { return }
             guard let dev = self.device else { return }   // session not yet configured → no-op until startPreview completes
             do { try dev.lockForConfiguration() } catch { return }
             if dev.isFocusPointOfInterestSupported {
