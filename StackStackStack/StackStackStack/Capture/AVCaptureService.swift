@@ -54,6 +54,8 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private let gateRecheckInterval = 0.1        // seconds between steadiness rechecks
     private let maxStartGateAttempts = 50        // ~5s: wait for the first frame to be steady, then fire anyway
     private let maxFrameGateAttempts = 30        // ~3s: if a later frame can't get steady, end the burst
+    private var sweepPositions: [Float] = []     // Depth: per-frame lens positions; empty = no sweep
+    private var manualLensSupported = true       // probed at configure; optimistic until then
     // Touched only on sessionQueue.
     private var configured = false
     // Computed once at configure (sessionQueue), read when building each capture's settings. The
@@ -97,6 +99,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 self.totalFrames = frameCount
                 self.isSteadyCheck = isSteady
                 self.onProgress = onProgress
+                self.sweepPositions = recipe.focusSweep?.positions ?? []
                 self.gateAttempts = 0
                 self.currentID = nil
                 self.rawType = rawType
@@ -141,6 +144,10 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         let id = settings.uniqueID
         self.currentID = id
 
+        let frameIndex = self.totalFrames - self.remaining
+        let sweepPosition: Float? =
+            (frameIndex >= 0 && frameIndex < self.sweepPositions.count) ? self.sweepPositions[frameIndex] : nil
+
         self.sessionQueue.async {
             // Don't fire for a superseded burst or a stopped session — fail this frame so the burst
             // advances instead of stalling until the watchdog.
@@ -150,7 +157,9 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 return
             }
             if let dims = self.cappedPhotoDimensions { settings.maxPhotoDimensions = dims }
-            self.output.capturePhoto(with: settings, delegate: self)
+            self.stepSweepFocusThenFire(position: sweepPosition) {
+                self.output.capturePhoto(with: settings, delegate: self)
+            }
         }
 
         self.stateQueue.asyncAfter(deadline: .now() + self.perFrameTimeout) {
@@ -255,6 +264,8 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     self.session.startRunning()  // off the main thread (sessionQueue)
                     self.device = dev
                     self.configured = true
+                    let lensSupported = dev.isLockingFocusWithCustomLensPositionSupported
+                    self.stateQueue.async { self.manualLensSupported = lensSupported }
                     // Bayer RAW must be vended by the configured output, else capture can't produce frames.
                     guard !self.output.availableRawPhotoPixelFormatTypes.isEmpty else {
                         throw CaptureError.noRawFormat
@@ -315,6 +326,21 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
     }
 
+    /// Depth sweep: step the lens to this frame's position and WAIT for the lens to settle before
+    /// firing — capturing mid-travel would blur the bracket. No sweep position, no manual-lens
+    /// support, or a config-lock failure all degrade to firing at the current focus (a worse
+    /// bracket beats a stalled burst; the watchdog never has to save us). Runs on `sessionQueue`.
+    /// (spec 2026-06-10 §5.2; same settle pattern as lockExposureAndFocus's manual-focus path)
+    private func stepSweepFocusThenFire(position: Float?, fire: @escaping () -> Void) {
+        guard let position, let dev = self.device,
+              dev.isLockingFocusWithCustomLensPositionSupported else { fire(); return }
+        do { try dev.lockForConfiguration() } catch { fire(); return }
+        dev.setFocusModeLocked(lensPosition: min(max(position, 0), 1)) { _ in
+            self.sessionQueue.async { fire() }
+        }
+        dev.unlockForConfiguration()
+    }
+
     /// Focus + meter exposure at `point` (normalized device coords). Tap → one-shot autofocus with
     /// continuous exposure metering at the point; long-press (`lock`) → one-shot AF + AE that hold
     /// (AE/AF lock). Runs on `sessionQueue`; every step capability-guarded. (design tap-to-focus §3.2)
@@ -341,6 +367,9 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
     }
 
+    /// Manual-focus capability, probed when the session configures (spec 2026-06-10 §5.4).
+    var supportsDepthOfField: Bool { stateQueue.sync { manualLensSupported } }
+
     // MARK: - Completion (always on stateQueue)
 
     /// Resume the continuation exactly once and clear per-burst state. Must run on `stateQueue`.
@@ -350,6 +379,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         currentID = nil            // ignore any late stragglers / watchdog fires
         isSteadyCheck = { true }    // release any captured coordinator/MotionSteadiness reference
         onProgress = nil            // release any captured coordinator reference
+        sweepPositions = []
         let frames = pending
         pending = []
         if frames.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
