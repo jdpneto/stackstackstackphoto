@@ -1,6 +1,12 @@
 import Foundation
 import StackEngineCore
 
+/// Library mutation failures surfaced to the editor UI.
+enum LibraryError: LocalizedError {
+    case recordMissing
+    var errorDescription: String? { "This stack no longer exists in the library." }
+}
+
 /// Minimal file-backed library: results (JPEG or HEIC) + a JSON index in the given root. All writes
 /// are atomic (temp-file + rename) and data-protected, and `loadAll` self-heals (drops records whose
 /// file vanished) and preserves a corrupt index rather than letting the next save overwrite it.
@@ -78,21 +84,30 @@ final class LibraryStore: @unchecked Sendable {
 
     /// Remove a stack's record and all of its files (result, original, edit sidecar).
     func delete(id: UUID) throws {
-        let format = record(for: id)?.encoderFormat
+        var records = (try? loadRaw()) ?? []
+        let format = records.first(where: { $0.id == id })?.encoderFormat
         var urls = [editsURL(for: id)]
         for f in format.map({ [$0] }) ?? [.jpeg, .heic] {   // unknown record → sweep both extensions
             urls.append(resultURL(for: id, format: f))
             urls.append(originalURL(for: id, format: f))
         }
         for url in urls { try? fm.removeItem(at: url) }
-        var records = (try? loadRaw()) ?? []
         records.removeAll { $0.id == id }
         try persist(records)
     }
 
     /// Delete every stack (Settings ▸ Storage). MainActor-only, like all writes.
     func deleteAll() throws {
-        for record in (try? loadRaw()) ?? [] { try delete(id: record.id) }
+        let records = (try? loadRaw()) ?? []
+        for rec in records {
+            var urls = [editsURL(for: rec.id)]
+            for f in [rec.encoderFormat] as [ImageEncoder.Format] {
+                urls.append(resultURL(for: rec.id, format: f))
+                urls.append(originalURL(for: rec.id, format: f))
+            }
+            for url in urls { try? fm.removeItem(at: url) }
+        }
+        try persist([])
     }
 
     /// Total bytes of all library files (results, originals, sidecars, index). Stateless file I/O —
@@ -116,6 +131,8 @@ final class LibraryStore: @unchecked Sendable {
             guard name.hasSuffix(".jpg") || name.hasSuffix(".heic") || name.hasSuffix(".json"),
                   name != "index.json" else { continue }
             let uuidPart = String(name.prefix(36))   // "<uuid>.jpg" / "<uuid>.orig.jpg" / "<uuid>.edits.json" / "<uuid>.heic"
+            // Non-UUID-named files are never per-stack files and must not be swept (e.g. index.corrupt).
+            guard UUID(uuidString: uuidPart) != nil else { continue }
             if !ids.contains(uuidPart) { try? fm.removeItem(at: f) }
         }
     }
@@ -144,14 +161,13 @@ final class LibraryStore: @unchecked Sendable {
     /// Overwrite the displayed result with a rendered image (in the record's own format), persist
     /// the adjustments, and bump `updatedAt` so gallery cells reload (their task id includes it).
     func applyEdit(id: UUID, adjustments: ImageAdjustments, rendered: Data) throws {
-        guard let rec = record(for: id) else { return }
+        var records = try loadRaw()
+        guard let i = records.firstIndex(where: { $0.id == id }) else { throw LibraryError.recordMissing }
+        let rec = records[i]
         try rendered.write(to: resultURL(for: id, format: rec.encoderFormat), options: Self.writeOptions)
         try JSONEncoder().encode(adjustments).write(to: editsURL(for: id), options: Self.writeOptions)
-        var records = (try? loadRaw()) ?? []
-        if let i = records.firstIndex(where: { $0.id == id }) {
-            records[i].updatedAt = Date()
-            try persist(records)
-        }
+        records[i].updatedAt = Date()
+        try persist(records)
     }
 
     private func persist(_ records: [StackRecord]) throws {

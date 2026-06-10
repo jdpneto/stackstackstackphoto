@@ -24,6 +24,7 @@ struct PhotoDetailView: View {
         let original: Data
         let adjustments: ImageAdjustments
         let preview: UIImage?
+        let format: ImageEncoder.Format
     }
 
     var body: some View {
@@ -72,7 +73,8 @@ struct PhotoDetailView: View {
         }
         .sheet(item: $editSource) { src in
             EditorView(originalJPEG: src.original, initialAdjustments: src.adjustments,
-                       initialPreview: src.preview, recordId: src.id, store: store) { renderedJPEG in
+                       initialPreview: src.preview, recordId: src.id, recordFormat: src.format,
+                       store: store) { renderedJPEG in
                 image = UIImage(data: renderedJPEG)   // reflect the edit in the viewer
                 onChanged()                           // and refresh the gallery (updatedAt bumped)
             }
@@ -98,7 +100,7 @@ struct PhotoDetailView: View {
             }.value
             guard let (data, adj, prevData) = loaded else { return }
             editSource = EditSource(id: id, original: data, adjustments: adj,
-                                    preview: prevData.flatMap { UIImage(data: $0) })
+                                    preview: prevData.flatMap { UIImage(data: $0) }, format: fmt)
         }
     }
 

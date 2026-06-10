@@ -207,26 +207,12 @@ final class StackCaptureCoordinator: ObservableObject {
             }
             if token.isCancelled { return }                        // cancelled while queued
             do {
-                // Encode with the snapshotted format; fall back to JPEG if HEIC fails so we
-                // never lose a stack to an encoder hiccup. (spec §8)
-                var encoded: (data: Data, format: ImageEncoder.Format)
-                do {
-                    let data = try await Self.makeResult(from: frames, mode: mode, format: format,
-                                                         orientationQuarterTurns: orientationQuarterTurns,
-                                                         shouldCancel: { token.isCancelled },
-                                                         encode: encode)
-                    encoded = (data, format)
-                } catch is CancellationError {
-                    return                                         // cancellation must NOT trigger the JPEG retry
-                } catch {
-                    guard format == .heic else { throw error }
-                    // HEIC encoder hiccup → fall back to JPEG and stamp the record accordingly.
-                    let data = try await Self.makeResult(from: frames, mode: mode, format: .jpeg,
-                                                         orientationQuarterTurns: orientationQuarterTurns,
-                                                         shouldCancel: { token.isCancelled },
-                                                         encode: encode)
-                    encoded = (data, .jpeg)
-                }
+                // makeResult handles the HEIC→JPEG fallback internally; the develop+align+stack
+                // pipeline is never re-run on a fallback, only the encode step. (spec §8)
+                let encoded = try await Self.makeResult(from: frames, mode: mode, format: format,
+                                                        orientationQuarterTurns: orientationQuarterTurns,
+                                                        shouldCancel: { token.isCancelled },
+                                                        encode: encode)
                 if token.isCancelled { return }                    // cancelled during processing → discard
                 let saved = try self.store.save(result: encoded.data, format: encoded.format,
                                                 mode: mode.rawValue, frameCount: frames.count)
@@ -275,11 +261,13 @@ final class StackCaptureCoordinator: ObservableObject {
     nonisolated private static let dumpFramesForDiagnostics = false
 
     /// CPU-heavy develop → downscale → align → stack → encode, run off the MainActor.
+    /// Returns `(data, format)` where format may differ from the requested format if HEIC encoding
+    /// failed and fell back to JPEG — only the encode step is retried, not the full pipeline. (spec §8)
     nonisolated private static func makeResult(from frames: [RawSensorFrame], mode: StackMode,
                                                format: ImageEncoder.Format,
                                                orientationQuarterTurns: Int,
                                                shouldCancel: @escaping @Sendable () -> Bool,
-                                               encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) async throws -> Data {
+                                               encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) async throws -> (data: Data, format: ImageEncoder.Format) {
         try await Task.detached(priority: .userInitiated) {
             let result: PixelImage
             if mode.isLongExposure {
@@ -307,9 +295,19 @@ final class StackCaptureCoordinator: ObservableObject {
                 if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
                 result = Pipeline.reduceImages(developed, mode: mode)   // already at working resolution
             }
+            // All cancellation checks precede the encode — a CancellationError here is from the
+            // pipeline above, not the encode, so the where-clause below can't swallow one mid-encode.
             let oriented = ImageGeometry.rotated(result, quarterTurns: orientationQuarterTurns)   // bake upright
             let rgba = OutputTransform.encodeSRGB8(oriented)
-            return try encode(rgba, oriented.width, oriented.height, format, 0.95)
+            do {
+                let data = try encode(rgba, oriented.width, oriented.height, format, 0.95)
+                return (data, format)
+            } catch where format == .heic {
+                // HEIC encoder hiccup → re-encode the SAME stacked pixels as JPEG; the pipeline
+                // (develop+align+stack) is never re-run. (spec §8)
+                let data = try encode(rgba, oriented.width, oriented.height, .jpeg, 0.95)
+                return (data, .jpeg)
+            }
         }.value
     }
 

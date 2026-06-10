@@ -26,6 +26,7 @@ struct CaptureView: View {
         let original: Data
         let adjustments: ImageAdjustments
         let preview: UIImage?
+        let format: ImageEncoder.Format
     }
 
     var body: some View {
@@ -93,7 +94,8 @@ struct CaptureView: View {
         }
         .sheet(item: $editSource) { src in
             EditorView(originalJPEG: src.original, initialAdjustments: src.adjustments,
-                       initialPreview: src.preview, recordId: src.id, store: coordinator.library) { renderedJPEG in
+                       initialPreview: src.preview, recordId: src.id, recordFormat: src.format,
+                       store: coordinator.library) { renderedJPEG in
                 lastResult = UIImage(data: renderedJPEG)   // reflect the edit directly — no disk read
             }
         }
@@ -105,17 +107,17 @@ struct CaptureView: View {
         guard let id = coordinator.lastSavedID else { return }
         let lib = coordinator.library
         Task {
-            let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, ImageAdjustments, Data?)? in
+            let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, ImageAdjustments, Data?, ImageEncoder.Format)? in
+                // Use the record's own format (spec §4: WYSIWYG; never the current setting).
+                let fmt = lib.record(for: id)?.encoderFormat ?? .jpeg
                 guard let data = lib.originalData(for: id) else { return nil }
                 let adj = lib.adjustments(for: id)
-                // Use the record's own format for the preview (spec §4: WYSIWYG; never the current setting).
-                let fmt = lib.record(for: id)?.encoderFormat ?? .jpeg
                 let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200, format: fmt)
-                return (data, adj, prev)
+                return (data, adj, prev, fmt)
             }.value
-            guard let (data, adj, prevData) = loaded else { return }
+            guard let (data, adj, prevData, fmt) = loaded else { return }
             editSource = EditSource(id: id, original: data, adjustments: adj,
-                                    preview: prevData.flatMap { UIImage(data: $0) })
+                                    preview: prevData.flatMap { UIImage(data: $0) }, format: fmt)
         }
     }
 

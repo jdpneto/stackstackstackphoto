@@ -23,13 +23,15 @@ struct EditorView: View {
 
     /// Adjustments + an initial downscaled preview are loaded OFF the main thread by the presenter
     /// and passed in, so the editor's init/body do no synchronous disk reads or full-res decodes.
+    /// `recordFormat` is supplied by the caller (already resolved off-main by the presenter) so the
+    /// editor init never touches the index.
     init(originalJPEG: Data, initialAdjustments: ImageAdjustments, initialPreview: UIImage?,
-         recordId: UUID, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
+         recordId: UUID, recordFormat: ImageEncoder.Format, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
         self.originalJPEG = originalJPEG
         self.recordId = recordId
         self.store = store
         self.onSaved = onSaved
-        self.recordFormat = store.record(for: recordId)?.encoderFormat ?? .jpeg
+        self.recordFormat = recordFormat
         _adj = State(initialValue: initialAdjustments)
         _preview = State(initialValue: initialPreview)
     }

@@ -240,6 +240,11 @@ final class CoordinatorTests: XCTestCase {
 
     @MainActor
     func testShootHonoursExportFormat() async throws {
+        // Hosts without an HEVC encoder (Intel-Mac simulators) can't produce HEIC at all — the
+        // coordinator's JPEG fallback is then correct behavior, not a format bug. Skip there.
+        let probe = try? ImageEncoder.encode(rgba8: [0, 0, 0, 255], width: 1, height: 1, format: .heic, quality: 0.9)
+        try XCTSkipIf(probe == nil, "host cannot encode HEIC")
+
         let (coord, store) = makeCoordinator()
         coord.exportFormat = .heic
         await coord.shoot()
