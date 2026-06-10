@@ -153,4 +153,30 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertEqual(store.record(for: saved.id)?.encoderFormat, .heic)
         XCTAssertNil(store.record(for: UUID()))
     }
+
+    // MARK: - Task 2 (blend-strength) tests
+
+    func testReferenceRoundTripAndDeletion() throws {
+        let store = makeStore()
+        let saved = try store.save(result: Data([0xAA]), reference: Data([0xBB]), format: .heic,
+                                   mode: "smoothMotion", frameCount: 3)
+        XCTAssertEqual(store.referenceData(for: saved.id), Data([0xBB]))
+        try store.delete(id: saved.id)
+        XCTAssertNil(store.referenceData(for: saved.id))
+    }
+
+    func testSaveWithoutReferenceHasNilReferenceData() throws {
+        let store = makeStore()
+        let saved = try store.save(result: Data([0xAA]), reference: nil, format: .jpeg,
+                                   mode: "depthOfField", frameCount: 10)
+        XCTAssertNil(store.referenceData(for: saved.id))
+    }
+
+    func testReconcileKeepsLiveReferences() throws {
+        let store = makeStore()
+        let saved = try store.save(result: Data([0xAA]), reference: Data([0xBB]), format: .jpeg,
+                                   mode: "noiseReduction", frameCount: 3)
+        store.reconcileOrphans()
+        XCTAssertNotNil(store.referenceData(for: saved.id))
+    }
 }

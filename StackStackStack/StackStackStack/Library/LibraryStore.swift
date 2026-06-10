@@ -38,7 +38,7 @@ final class LibraryStore: @unchecked Sendable {
     struct SavedStack { let id: UUID; let resultURL: URL }
 
     @discardableResult
-    func save(result: Data, format: ImageEncoder.Format, mode: String, frameCount: Int) throws -> SavedStack {
+    func save(result: Data, reference: Data? = nil, format: ImageEncoder.Format, mode: String, frameCount: Int) throws -> SavedStack {
         let id = UUID()
         let fileName = "\(id.uuidString).\(format.fileExtension)"
         let url = root.appendingPathComponent(fileName)
@@ -47,6 +47,11 @@ final class LibraryStore: @unchecked Sendable {
         // pointing at a file that isn't there.
         try result.write(to: url, options: Self.writeOptions)
         try result.write(to: originalURL(for: id, format: format), options: Self.writeOptions)   // immutable original
+        // The aligned reference frame — the blend-strength lerp's second endpoint; absent for depth
+        // and legacy records (the slider is hidden when nil).
+        if let reference {
+            try reference.write(to: referenceURL(for: id, format: format), options: Self.writeOptions)
+        }
         var records = (try? loadRaw()) ?? []
         records.insert(StackRecord(id: id, createdAt: now, mode: mode, frameCount: frameCount,
                                    resultFileName: fileName, updatedAt: now, format: format.rawValue), at: 0)
@@ -82,7 +87,7 @@ final class LibraryStore: @unchecked Sendable {
         ((try? loadRaw()) ?? []).first { $0.id == id }
     }
 
-    /// Remove a stack's record and all of its files (result, original, edit sidecar).
+    /// Remove a stack's record and all of its files (result, original, reference, edit sidecar).
     func delete(id: UUID) throws {
         var records = (try? loadRaw()) ?? []
         let format = records.first(where: { $0.id == id })?.encoderFormat
@@ -90,6 +95,7 @@ final class LibraryStore: @unchecked Sendable {
         for f in format.map({ [$0] }) ?? [.jpeg, .heic] {   // unknown record → sweep both extensions
             urls.append(resultURL(for: id, format: f))
             urls.append(originalURL(for: id, format: f))
+            urls.append(referenceURL(for: id, format: f))
         }
         for url in urls { try? fm.removeItem(at: url) }
         records.removeAll { $0.id == id }
@@ -104,6 +110,7 @@ final class LibraryStore: @unchecked Sendable {
             for f in [rec.encoderFormat] as [ImageEncoder.Format] {
                 urls.append(resultURL(for: rec.id, format: f))
                 urls.append(originalURL(for: rec.id, format: f))
+                urls.append(referenceURL(for: rec.id, format: f))
             }
             for url in urls { try? fm.removeItem(at: url) }
         }
@@ -143,12 +150,23 @@ final class LibraryStore: @unchecked Sendable {
     private func originalURL(for id: UUID, format: ImageEncoder.Format) -> URL {
         root.appendingPathComponent("\(id.uuidString).orig.\(format.fileExtension)")
     }
+    /// The aligned reference frame used for blend-strength editing (`<uuid>.ref.<ext>`).
+    private func referenceURL(for id: UUID, format: ImageEncoder.Format) -> URL {
+        root.appendingPathComponent("\(id.uuidString).ref.\(format.fileExtension)")
+    }
     private func editsURL(for id: UUID) -> URL { root.appendingPathComponent("\(id.uuidString).edits.json") }
 
     /// The immutable original stacked image (the record's own format), used as the editing source.
     func originalData(for id: UUID) -> Data? {
         guard let rec = record(for: id) else { return nil }
         return try? Data(contentsOf: originalURL(for: id, format: rec.encoderFormat))
+    }
+
+    /// The aligned reference frame (the blend-strength lerp's second endpoint), or nil for depth
+    /// records, legacy records, or any record whose ref file is absent or corrupt.
+    func referenceData(for id: UUID) -> Data? {
+        guard let rec = record(for: id) else { return nil }
+        return try? Data(contentsOf: referenceURL(for: id, format: rec.encoderFormat))
     }
 
     /// The persisted adjustments for a record (identity if none / unreadable).

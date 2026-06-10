@@ -76,4 +76,27 @@ final class ResultRendererTests: XCTestCase {
         XCTAssertNotNil(ImageDecoder.rgba8(from: out, maxPixel: nil), "HEIC output must decode")
         XCTAssertNotEqual(out.prefix(3), Data([0xFF, 0xD8, 0xFF]), "must not be JPEG magic bytes")
     }
+
+    // MARK: - Task 2 (blend-strength) tests
+
+    private func encodeFlat(level: Float) throws -> Data {
+        let img = PixelImage(width: 8, height: 8, fill: SIMD3<Float>(level, level, level))
+        let rgba = OutputTransform.encodeSRGB8(img)
+        return try ImageEncoder.encode(rgba8: rgba, width: 8, height: 8, format: .jpeg, quality: 1.0)
+    }
+
+    func testRenderAtAlphaZeroMatchesReference() throws {
+        // Two flat images: original 0.8 grey, reference 0.2 grey; α=0 must render ≈ the reference.
+        let original = try encodeFlat(level: 0.8)
+        let reference = try encodeFlat(level: 0.2)
+        var adj = ImageAdjustments.identity
+        adj.blendStrength = 0
+        let out = try XCTUnwrap(ResultRenderer.render(originalJPEG: original, adjustments: adj,
+                                                      quality: 0.95, referenceJPEG: reference))
+        let (rgba, w, h) = try XCTUnwrap(ImageDecoder.rgba8(from: out, maxPixel: nil))
+        // Centre pixel ≈ the reference's sRGB-encoded 0.2-linear grey (same encode path); tolerance for JPEG.
+        let refDecoded = try XCTUnwrap(ImageDecoder.rgba8(from: reference, maxPixel: nil))
+        XCTAssertTrue(abs(Int(rgba[(h/2 * w + w/2) * 4]) - Int(refDecoded.0[(h/2 * w + w/2) * 4])) < 6,
+                      "α=0 render must match the reference within JPEG tolerance")
+    }
 }

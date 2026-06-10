@@ -101,5 +101,16 @@ final class PipelineStreamingTests: XCTestCase {
         XCTAssertEqual(result.width, reference.width)
         XCTAssertEqual(result.height, reference.height)
         XCTAssertTrue(reference.pixels[0].x.isFinite)
+        // Fold-in: the reference pixel must equal frame 0's developed content — i.e. the anchor is the
+        // first frame, not the stacked mean. Develop frame 0 the same way and compare a centre pixel
+        // with tolerance for floating-point rounding in the downscale path. (spec 2026-06-11 §3)
+        let anchor0 = ColorPipeline.processBinned(frames[0])
+        // Both the stored reference and this independently-developed frame go through the same
+        // downscaleOne path inside reduceStreamingWithReference (workingResolution = nil → no downscale),
+        // so pixels should match exactly. Pick the centre pixel as a stable representative.
+        let cx = anchor0.width / 2, cy = anchor0.height / 2
+        let idx = cy * anchor0.width + cx
+        XCTAssertEqual(reference.pixels[idx].x, anchor0.pixels[idx].x, accuracy: 1e-5,
+                       "reference centre pixel must equal frame 0's developed value, not the stack mean")
     }
 }

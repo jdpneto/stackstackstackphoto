@@ -6,6 +6,7 @@ import StackEngineCore
 /// downscaled live preview rendered off the main thread. Save persists the adjustments + result.
 struct EditorView: View {
     let originalJPEG: Data
+    let referenceJPEG: Data?   // aligned reference frame for the blend-strength lerp (nil → slider hidden)
     let recordId: UUID
     let store: LibraryStore
     var onSaved: (Data) -> Void
@@ -25,9 +26,11 @@ struct EditorView: View {
     /// and passed in, so the editor's init/body do no synchronous disk reads or full-res decodes.
     /// `recordFormat` is supplied by the caller (already resolved off-main by the presenter) so the
     /// editor init never touches the index.
-    init(originalJPEG: Data, initialAdjustments: ImageAdjustments, initialPreview: UIImage?,
-         recordId: UUID, recordFormat: ImageEncoder.Format, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
+    init(originalJPEG: Data, referenceJPEG: Data? = nil, initialAdjustments: ImageAdjustments,
+         initialPreview: UIImage?, recordId: UUID, recordFormat: ImageEncoder.Format,
+         store: LibraryStore, onSaved: @escaping (Data) -> Void) {
         self.originalJPEG = originalJPEG
+        self.referenceJPEG = referenceJPEG
         self.recordId = recordId
         self.store = store
         self.onSaved = onSaved
@@ -45,6 +48,11 @@ struct EditorView: View {
                 }
                 .padding()
                 Spacer()
+                // Blend slider only when a reference frame was stored at capture (long-exposure looks).
+                // α=1 is the full stacked look; α=0 is the aligned reference frame. (spec 2026-06-11 §3)
+                if referenceJPEG != nil {
+                    slider("Blend", value: $adj.blendStrength, range: 0...1, step: 0.05)
+                }
                 slider("Exposure", value: $adj.exposureEV, range: -2...2)
                 slider("Contrast", value: $adj.contrast, range: -1...1)
                 slider("Warmth", value: $adj.temperature, range: -1...1)
@@ -76,11 +84,15 @@ struct EditorView: View {
         }
     }
 
-    private func slider(_ label: String, value: Binding<Float>, range: ClosedRange<Float>) -> some View {
+    private func slider(_ label: String, value: Binding<Float>, range: ClosedRange<Float>, step: Float? = nil) -> some View {
         HStack {
             Text(label).frame(width: 80, alignment: .leading)
             // Re-render the preview when the user finishes dragging (not on every tick).
-            Slider(value: value, in: range, onEditingChanged: { editing in if !editing { schedulePreview() } })
+            if let step {
+                Slider(value: value, in: range, step: step, onEditingChanged: { editing in if !editing { schedulePreview() } })
+            } else {
+                Slider(value: value, in: range, onEditingChanged: { editing in if !editing { schedulePreview() } })
+            }
         }.padding(.horizontal)
     }
 
@@ -89,10 +101,11 @@ struct EditorView: View {
         renderTask?.cancel()
         generation += 1
         let gen = generation
-        let current = adj, jpeg = originalJPEG, fmt = recordFormat
+        let current = adj, jpeg = originalJPEG, fmt = recordFormat, refJPEG = referenceJPEG
         renderTask = Task {
             let data = await Task.detached(priority: .userInitiated) {
-                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200, format: fmt)
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200,
+                                      format: fmt, referenceJPEG: refJPEG)
             }.value
             // Drop a stale render: a newer schedulePreview (higher generation) or a cancel supersedes it.
             if Task.isCancelled || gen != generation { return }
@@ -104,9 +117,11 @@ struct EditorView: View {
         guard !isSaving else { return }   // reject a re-entrant Save while one is in flight
         isSaving = true
         let current = adj, jpeg = originalJPEG, theStore = store, id = recordId, fmt = recordFormat
+        let refJPEG = referenceJPEG
         Task {
             let rendered = await Task.detached(priority: .userInitiated) {
-                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.95, format: fmt)
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.95, format: fmt,
+                                      referenceJPEG: refJPEG)
             }.value
             isSaving = false
             guard let rendered else { saveError = true; return }   // don't claim success on a failed render

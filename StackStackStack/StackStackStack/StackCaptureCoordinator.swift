@@ -214,8 +214,8 @@ final class StackCaptureCoordinator: ObservableObject {
                                                         shouldCancel: { token.isCancelled },
                                                         encode: encode)
                 if token.isCancelled { return }                    // cancelled during processing → discard
-                let saved = try self.store.save(result: encoded.data, format: encoded.format,
-                                                mode: mode.rawValue, frameCount: frames.count)
+                let saved = try self.store.save(result: encoded.data, reference: encoded.reference,
+                                                format: encoded.format, mode: mode.rawValue, frameCount: frames.count)
                 // `lastResultJPEG` keeps its historical name; it stores display bytes — ImageIO decodes both JPEG and HEIC.
                 self.lastResultJPEG = encoded.data
                 self.lastSavedID = saved.id
@@ -261,23 +261,30 @@ final class StackCaptureCoordinator: ObservableObject {
     nonisolated private static let dumpFramesForDiagnostics = false
 
     /// CPU-heavy develop → downscale → align → stack → encode, run off the MainActor.
-    /// Returns `(data, format)` where format may differ from the requested format if HEIC encoding
-    /// failed and fell back to JPEG — only the encode step is retried, not the full pipeline. (spec §8)
+    /// Returns `(data, reference, format)` where format may differ from the requested format if HEIC
+    /// encoding failed and fell back to JPEG — only the encode step is retried, not the full pipeline.
+    /// `reference` is the encoded aligned anchor frame (same orientation + format as the result),
+    /// used as the blend-strength lerp's second endpoint; nil for depth stacks (no blend semantics)
+    /// and when the reference encode itself fails (safe degradation — never loses the main result).
+    /// (spec §8, spec 2026-06-11 §3)
     nonisolated private static func makeResult(from frames: [RawSensorFrame], mode: StackMode,
                                                format: ImageEncoder.Format,
                                                orientationQuarterTurns: Int,
                                                shouldCancel: @escaping @Sendable () -> Bool,
-                                               encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) async throws -> (data: Data, format: ImageEncoder.Format) {
+                                               encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) async throws -> (data: Data, reference: Data?, format: ImageEncoder.Format) {
         try await Task.detached(priority: .userInitiated) {
             let result: PixelImage
+            var referencePixels: PixelImage?   // the aligned anchor — nil for depth
             if mode.isLongExposure {
                 // Streaming: one developed+aligned frame in flight at a time; cancellable between frames.
-                result = try Pipeline.reduceStreaming(frames, mode: mode,
-                                                      workingResolution: managedWorkingResolution,
-                                                      binnedDevelop: true, shouldCancel: shouldCancel)
+                let (res, ref) = try Pipeline.reduceStreamingWithReference(frames, mode: mode,
+                                                                           workingResolution: managedWorkingResolution,
+                                                                           binnedDevelop: true, shouldCancel: shouldCancel)
+                result = res
+                referencePixels = ref
             } else if mode == .depthOfField {
                 // Depth: develop all brackets at the managed depth resolution, then focus-stack.
-                // maxFrames follows the actual capture (the recipe already capped it). (spec 2026-06-10 §6)
+                // No blend-strength reference — α is a long-exposure/noise concept. (spec 2026-06-11 §4)
                 let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
                                                          workingResolution: depthWorkingResolution)
                 if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
@@ -288,25 +295,42 @@ final class StackCaptureCoordinator: ObservableObject {
                                         maxFrames: max(frames.count, 1)))
                 else { throw ProcessingError.focusStackFailed }
                 result = stacked
+                referencePixels = nil
             } else {
                 let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
                                                          workingResolution: managedWorkingResolution)
                 if shouldCancel() { throw CancellationError() }   // cancel between develop and reduce (static path)
                 if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
-                result = Pipeline.reduceImages(developed, mode: mode)   // already at working resolution
+                let (res, ref) = Pipeline.reduceImagesWithReference(developed, mode: mode)
+                result = res
+                referencePixels = ref
             }
             // All cancellation checks precede the encode — a CancellationError here is from the
             // pipeline above, not the encode, so the where-clause below can't swallow one mid-encode.
             let oriented = ImageGeometry.rotated(result, quarterTurns: orientationQuarterTurns)   // bake upright
+            // The reference must go through the SAME orientation bake so the lerp endpoints are
+            // aligned pixel-to-pixel in the final stored images. (spec 2026-06-11 §4)
+            let orientedRef = referencePixels.map { ImageGeometry.rotated($0, quarterTurns: orientationQuarterTurns) }
             let rgba = OutputTransform.encodeSRGB8(oriented)
             do {
                 let data = try encode(rgba, oriented.width, oriented.height, format, 0.95)
-                return (data, format)
+                // Encode the reference in the SAME format the result ended up with; wrap in try? so a
+                // reference encode failure never loses the main result. (spec 2026-06-11 §6)
+                let refData = orientedRef.flatMap { ref -> Data? in
+                    let refRGBA = OutputTransform.encodeSRGB8(ref)
+                    return try? encode(refRGBA, ref.width, ref.height, format, 0.95)
+                }
+                return (data, refData, format)
             } catch where format == .heic {
                 // HEIC encoder hiccup → re-encode the SAME stacked pixels as JPEG; the pipeline
-                // (develop+align+stack) is never re-run. (spec §8)
+                // (develop+align+stack) is never re-run. Both result and reference fall back together
+                // so the pair always shares one format. (spec §8)
                 let data = try encode(rgba, oriented.width, oriented.height, .jpeg, 0.95)
-                return (data, .jpeg)
+                let refData = orientedRef.flatMap { ref -> Data? in
+                    let refRGBA = OutputTransform.encodeSRGB8(ref)
+                    return try? encode(refRGBA, ref.width, ref.height, .jpeg, 0.95)
+                }
+                return (data, refData, .jpeg)
             }
         }.value
     }

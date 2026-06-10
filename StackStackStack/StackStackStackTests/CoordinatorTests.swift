@@ -323,6 +323,28 @@ final class CoordinatorTests: XCTestCase {
         _ = await coord.startPreview()
         XCTAssertTrue(coord.supportsRAW)
     }
+
+    // MARK: - Task 2 (blend-strength) tests
+
+    @MainActor
+    func testShootSavesAReferenceForBlendableLooks() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .smoothMotion
+        await coord.shoot()
+        await coord.awaitProcessing()
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertNotNil(store.referenceData(for: rec.id), "long-exposure looks store the blend reference")
+    }
+
+    @MainActor
+    func testDepthShootSavesNoReference() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .depthOfField
+        await coord.shoot()
+        await coord.awaitProcessing()
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertNil(store.referenceData(for: rec.id), "no blend semantics for focus stacks")
+    }
 }
 
 // MARK: - Helpers

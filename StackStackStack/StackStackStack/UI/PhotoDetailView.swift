@@ -22,6 +22,7 @@ struct PhotoDetailView: View {
     private struct EditSource: Identifiable {
         let id: UUID
         let original: Data
+        let reference: Data?   // aligned reference frame for blend-strength (nil → slider hidden)
         let adjustments: ImageAdjustments
         let preview: UIImage?
         let format: ImageEncoder.Format
@@ -72,7 +73,8 @@ struct PhotoDetailView: View {
             ShareSheet(items: [store.resultURL(for: record)])
         }
         .sheet(item: $editSource) { src in
-            EditorView(originalJPEG: src.original, initialAdjustments: src.adjustments,
+            EditorView(originalJPEG: src.original, referenceJPEG: src.reference,
+                       initialAdjustments: src.adjustments,
                        initialPreview: src.preview, recordId: src.id, recordFormat: src.format,
                        store: store) { renderedJPEG in
                 image = UIImage(data: renderedJPEG)   // reflect the edit in the viewer
@@ -92,20 +94,23 @@ struct PhotoDetailView: View {
         let lib = store
         let fmt = record.encoderFormat   // the record's own format (spec §4: never the current setting)
         Task {
-            let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, ImageAdjustments, Data?)? in
+            let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, Data?, ImageAdjustments, Data?)? in
                 guard let data = lib.originalData(for: id) else { return nil }
+                let ref = lib.referenceData(for: id)   // nil for depth + pre-this-PR records
                 let adj = lib.adjustments(for: id)
-                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200, format: fmt)
-                return (data, adj, prev)
+                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200,
+                                                 format: fmt, referenceJPEG: ref)
+                return (data, ref, adj, prev)
             }.value
-            guard let (data, adj, prevData) = loaded else { return }
-            editSource = EditSource(id: id, original: data, adjustments: adj,
+            guard let (data, ref, adj, prevData) = loaded else { return }
+            editSource = EditSource(id: id, original: data, reference: ref, adjustments: adj,
                                     preview: prevData.flatMap { UIImage(data: $0) }, format: fmt)
         }
     }
 
     /// Persist a 90° rotation as a non-destructive `quarterTurns` adjustment: render the original
     /// through the updated adjustments off-main, then save via the same path the editor uses.
+    /// The reference is passed through so the blend-strength lerp remains valid after rotation.
     private func rotate(by delta: Int) {
         guard !rotating else { return }
         rotating = true
@@ -113,11 +118,13 @@ struct PhotoDetailView: View {
         let fmt = record.encoderFormat   // the record's own format (spec §4: never the current setting)
         Task {
             let result: (ImageAdjustments, Data)? = await Task.detached(priority: .userInitiated) {
-                // originalData and adjustments are safe to read off the main thread (file I/O only).
+                // originalData, referenceData, and adjustments are safe to read off the main thread (file I/O only).
                 guard let original = lib.originalData(for: id) else { return nil }
+                let ref = lib.referenceData(for: id)   // nil for depth + pre-this-PR records; blend persists
                 var adj = lib.adjustments(for: id)
                 adj.quarterTurns += delta   // ImageAdjustments normalizes into 0…3 via its didSet
-                guard let rendered = ResultRenderer.render(originalJPEG: original, adjustments: adj, quality: 0.95, format: fmt)
+                guard let rendered = ResultRenderer.render(originalJPEG: original, adjustments: adj, quality: 0.95,
+                                                           format: fmt, referenceJPEG: ref)
                 else { return nil }
                 return (adj, rendered)
             }.value

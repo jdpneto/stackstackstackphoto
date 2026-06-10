@@ -162,8 +162,11 @@ final class PipelineTests: XCTestCase {
         XCTAssertEqual(result.width, reference.width)
         XCTAssertEqual(result.height, reference.height)
         XCTAssertEqual(reference.pixels.count, reference.width * reference.height)
-        // The reference must be one of the aligned frames (non-empty pixel count, finite values).
-        XCTAssertTrue(reference.pixels[0].x.isFinite)
+        // Fold-in: the reference must contain pixel content from one of the INPUT frames — i.e. the
+        // anchor is either frame `a` (0.3) or frame `b` (0.7), NOT the stacked mean. This catches any
+        // regression where the result is returned instead of the aligned anchor. (spec 2026-06-11 §3)
+        XCTAssertTrue([Float(0.3), Float(0.7)].contains(reference.pixels[0].x),
+                      "reference pixel must equal one input frame's fill value, got \(reference.pixels[0].x)")
     }
 
     func testReduceRawPathHandlesAllModes() {
