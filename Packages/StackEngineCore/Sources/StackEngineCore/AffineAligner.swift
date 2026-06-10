@@ -25,20 +25,20 @@ public enum AffineAligner {
     /// translation doubles per finer level. Robust on real high-frequency frames.
     /// `robustClip` (when set) caps each pixel's squared luma residual, so a region that moves
     /// differently from the global motion — a person/video in a handheld scene — can't pull the
-    /// estimate off the static background it should lock onto. nil = plain SSD (the DoF path).
+    /// estimate off the static background it should lock onto. nil = plain SSD.
     /// `translationHint` seeds the coarsest-level optimizer (before the integer translation search),
     /// measured in pixels at the finest (input) resolution; useful when the caller has a robust
     /// prior on translation (e.g. from a robust-SSD pre-pass) that defeats a plain-SSD search.
     public static func estimate(reference ref: PixelImage, moving mov: PixelImage,
                                 translationSearch: Int = 8, robustClip: Float? = nil,
-                                translationHint: (Float, Float)? = nil) -> Transform2D {
+                                translationHint: SIMD2<Float>? = nil) -> Transform2D {
         precondition(ref.width == mov.width && ref.height == mov.height)
         let refPyr = ImagePyramid.gaussian(ref, minSize: 24)
         let movPyr = ImagePyramid.gaussian(mov, minSize: 24)
         let levels = refPyr.count
         var s: Float = 1, r: Float = 0
-        var tx: Float = (translationHint?.0 ?? 0) / Float(1 << (levels - 1))
-        var ty: Float = (translationHint?.1 ?? 0) / Float(1 << (levels - 1))
+        var tx: Float = (translationHint?.x ?? 0) / Float(1 << (levels - 1))
+        var ty: Float = (translationHint?.y ?? 0) / Float(1 << (levels - 1))
         for lvl in stride(from: levels - 1, through: 0, by: -1) {   // coarsest → finest
             let rL = Luma.luminance(refPyr[lvl]), mL = Luma.luminance(movPyr[lvl])
             let lw = refPyr[lvl].width, lh = refPyr[lvl].height
@@ -127,16 +127,35 @@ public enum AffineAligner {
     public static func alignChain(_ frames: [PixelImage], referenceIndex: Int,
                                   bounds: ChainBounds = .default) -> [Transform2D] {
         precondition(frames.indices.contains(referenceIndex), "referenceIndex out of range")
-        var transforms = [Transform2D](repeating: .identity, count: frames.count)
-        // Up the sweep: link maps frame[i-1] coords → frame[i] coords.
+        precondition(frames.allSatisfy { $0.width == frames[0].width && $0.height == frames[0].height },
+                     "all frames must be the same size")
+        var links = [Transform2D](repeating: .identity, count: frames.count)
         for i in (referenceIndex + 1)..<frames.count {
-            let link = boundedLink(reference: frames[i - 1], moving: frames[i], bounds: bounds)
-            transforms[i] = link.composed(with: transforms[i - 1])
+            links[i] = boundedLink(reference: frames[i - 1], moving: frames[i], bounds: bounds)
         }
-        // Down the sweep: roles swapped so the link maps frame[i+1] coords → frame[i] coords.
         for i in stride(from: referenceIndex - 1, through: 0, by: -1) {
-            let link = boundedLink(reference: frames[i + 1], moving: frames[i], bounds: bounds)
-            transforms[i] = link.composed(with: transforms[i + 1])
+            links[i] = boundedLink(reference: frames[i + 1], moving: frames[i], bounds: bounds)
+        }
+        return accumulateLinks(links, referenceIndex: referenceIndex)
+    }
+
+    /// Accumulate per-adjacent-pair links into per-frame warp-to-reference transforms, composing
+    /// outward from `referenceIndex`. `links[referenceIndex]` is ignored (the reference maps to
+    /// identity). This function is separated from link estimation so it can be unit-tested directly
+    /// with exact algebraically-constructed links, bypassing estimator noise.
+    ///
+    /// Composition direction: `transforms[i] = links[i].composed(with: transforms[i-1])` for the
+    /// up-sweep, so `transforms[i].apply(p)` = `links[i].apply(transforms[i-1].apply(p))` — each
+    /// link is applied in sequence from the reference outward (reference side applied last).
+    static func accumulateLinks(_ links: [Transform2D], referenceIndex: Int) -> [Transform2D] {
+        var transforms = [Transform2D](repeating: .identity, count: links.count)
+        // Up the sweep: link maps frame[i-1] coords → frame[i] coords.
+        for i in (referenceIndex + 1)..<links.count {
+            transforms[i] = links[i].composed(with: transforms[i - 1])
+        }
+        // Down the sweep: link maps frame[i+1] coords → frame[i] coords.
+        for i in stride(from: referenceIndex - 1, through: 0, by: -1) {
+            transforms[i] = links[i].composed(with: transforms[i + 1])
         }
         return transforms
     }
@@ -152,9 +171,9 @@ public enum AffineAligner {
         // Pre-compute a robust translation so the Hooke–Jeeves optimizer starts at the right basin.
         // Plain-SSD translation search can be pulled toward focal-band alignment (band k+1 aligning
         // with band k) rather than handheld-drift correction; robust SSD suppresses that.
-        let robustShift = robustTranslation(reference: refSmall, moving: movSmall,
-                                            searchRange: 8, robustClip: bounds.robustClip)
-        let hint: (Float, Float) = (Float(robustShift.dx), Float(robustShift.dy))
+        let robustShift = Alignment.estimateTranslation(reference: refSmall, moving: movSmall,
+                                                        searchRange: 8, robustClip: bounds.robustClip)
+        let hint = SIMD2<Float>(Float(robustShift.dx), Float(robustShift.dy))
         // Use robust clip + the robust translation hint so the optimizer starts in the right basin.
         let t = estimate(reference: refSmall, moving: movSmall, robustClip: bounds.robustClip,
                          translationHint: hint)
@@ -170,41 +189,6 @@ public enum AffineAligner {
         // Scale or rotation is implausible — fall back to robust translation-only (no smearing).
         return .similarity(scale: 1, rotation: 0,
                            tx: Float(robustShift.dx) * factor, ty: Float(robustShift.dy) * factor)
-    }
-
-    /// Integer translation minimising mean robust-SSD (per-pixel residuals capped at `clip`),
-    /// so in-focus/out-of-focus mismatches cannot pull the estimate away from the common background
-    /// signal. Falls back to plain SSD when `clip` is nil.
-    private static func robustTranslation(reference ref: PixelImage, moving mov: PixelImage,
-                                          searchRange r: Int, robustClip clip: Float?) -> Translation {
-        guard let clip else {
-            return Alignment.estimateTranslation(reference: ref, moving: mov, searchRange: r)
-        }
-        let w = ref.width, h = ref.height
-        let rl = Luma.luminance(ref), ml = Luma.luminance(mov)
-        var best = Translation(dx: 0, dy: 0)
-        var bestCost = Float.infinity
-        for mag in 0...r {
-            for dy in -mag...mag {
-                for dx in -mag...mag {
-                    guard abs(dx) == mag || abs(dy) == mag else { continue }
-                    var cost: Float = 0; var count: Float = 0
-                    let yStart = max(0, -dy), yEnd = min(h, h - dy)
-                    let xStart = max(0, -dx), xEnd = min(w, w - dx)
-                    if yStart >= yEnd || xStart >= xEnd { continue }
-                    for y in yStart..<yEnd {
-                        for x in xStart..<xEnd {
-                            let d = rl[y * w + x] - ml[(y + dy) * w + (x + dx)]
-                            cost += Swift.min(d * d, clip)
-                            count += 1
-                        }
-                    }
-                    let mean = cost / count
-                    if mean < bestCost { bestCost = mean; best = Translation(dx: dx, dy: dy) }
-                }
-            }
-        }
-        return best
     }
 
     /// Halve until the long edge is within `maxEdge`; returns the reduced image and the factor to
@@ -264,9 +248,10 @@ public struct ChainBounds: Sendable, Equatable {
     public var maxTranslationFraction: Float
     /// Per-pixel squared-residual cap passed to `AffineAligner.estimate` and the robust
     /// translation pre-pass, so focus-blur mismatches between adjacent brackets cannot pull the
-    /// optimizer off the common background signal. 0.0001 clips pixels differing by > 0.01 in luma
-    /// — tight enough to suppress focal-band mismatches (amplitude diff ≈ 0.20) while letting
-    /// the common ramp/texture (per-pixel diff ≈ 0.001 for a 1-px shift) drive the estimate.
+    /// optimizer off the common background signal.
+    /// Default (0.0001) tuned on the synthetic bracket fixture (band amplitude diff ≈ 0.20);
+    /// the proven handheld clip for whole-frame alignment is Pipeline.alignmentRobustClip = 0.02.
+    /// Validate on-device (Task 12); if high-ISO links mis-seed, relax toward 0.001.
     /// nil = plain SSD (no clipping).
     public var robustClip: Float?
 

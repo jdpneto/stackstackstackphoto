@@ -8,20 +8,27 @@ public struct Translation: Equatable, Sendable {
 
 public enum Alignment {
     /// Integer translation (dx,dy) minimizing mean luma SSD where ref[x,y] ~ moving[x+dx, y+dy].
+    /// `robustClip` caps each pixel's squared residual (nil = plain SSD).
     public static func estimateTranslation(reference ref: PixelImage,
                                            moving mov: PixelImage,
-                                           searchRange r: Int) -> Translation {
+                                           searchRange r: Int,
+                                           robustClip: Float? = nil) -> Translation {
         precondition(ref.width == mov.width && ref.height == mov.height)
         return estimateTranslation(referenceLuma: Luma.luminance(ref),
                                    movingLuma: Luma.luminance(mov),
-                                   width: ref.width, height: ref.height, searchRange: r)
+                                   width: ref.width, height: ref.height, searchRange: r,
+                                   robustClip: robustClip)
     }
 
     /// Integer translation over precomputed luminance buffers (lets the pipeline reuse luma).
+    /// `robustClip` (when set) caps each pixel's squared residual before accumulating, so
+    /// focus-blur mismatches (or any outlier region) cannot pull the estimate away from the
+    /// common background signal. nil = plain SSD.
     static func estimateTranslation(referenceLuma lr: [Float],
                                     movingLuma lm: [Float],
                                     width w: Int, height h: Int,
-                                    searchRange r: Int) -> Translation {
+                                    searchRange r: Int,
+                                    robustClip: Float? = nil) -> Translation {
         precondition(r >= 0, "searchRange must be >= 0")
         var best = Translation(dx: 0, dy: 0)
         var bestCost = Float.infinity
@@ -39,7 +46,8 @@ public enum Alignment {
                     for y in yStart..<yEnd {
                         for x in xStart..<xEnd {
                             let d = lr[y * w + x] - lm[(y + dy) * w + (x + dx)]
-                            cost += d * d
+                            let d2 = d * d
+                            cost += robustClip.map { Swift.min(d2, $0) } ?? d2
                             count += 1
                         }
                     }
