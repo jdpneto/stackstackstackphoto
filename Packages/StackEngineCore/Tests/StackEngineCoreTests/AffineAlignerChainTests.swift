@@ -134,7 +134,7 @@ final class AffineAlignerChainTests: XCTestCase {
         //   t1 = link1 (same for first step: id.composed(with: link1) = link1)
         //   t2 = link1 ∘ link2; t3 = (link1 ∘ link2) ∘ link3
         let t2_wrong = link1.composed(with: link2)
-        let t3_wrong = t2_wrong.composed(with: link3)
+        _ = t2_wrong.composed(with: link3)   // t3_wrong: not asserted, but kept to document the wrong chain
 
         // Verify the fixture is non-degenerate: the two orderings differ by > 1 px.
         XCTAssertGreaterThan(abs(t2_want.tx - t2_wrong.tx), 1.0,
@@ -156,5 +156,106 @@ final class AffineAlignerChainTests: XCTestCase {
         // t3: accumulated error grows further.
         XCTAssertEqual(result[3].tx, t3_want.tx, accuracy: 1e-4,
             "t3 tx must follow correct composition chain")
+    }
+
+    // MARK: - Part B: down-sweep composition order
+
+    /// Mirrors `testAccumulateLinksOrderIsLinkComposedWithPrev` for the DOWN-SWEEP path
+    /// (referenceIndex at the end, i.e. referenceIndex = links.count - 1).
+    ///
+    /// Down-sweep code: `transforms[i] = links[i].composed(with: transforms[i+1])`.
+    ///
+    /// Links array: [link3, link1, link2, .identity], referenceIndex = 3.
+    /// Correct accumulated transforms:
+    ///   transforms[3] = .identity   (reference)
+    ///   transforms[2] = link2.composed(with: .identity)           = link2
+    ///   transforms[1] = link1.composed(with: transforms[2])       = link1 ∘ link2
+    ///   transforms[0] = link3.composed(with: transforms[1])       = link3 ∘ link1 ∘ link2
+    ///
+    /// Wrong (transposed: transforms[i+1].composed(with: links[i])):
+    ///   transforms[2] = .identity.composed(with: link2)           = link2  (trivially same)
+    ///   transforms[1] = transforms[2].composed(with: link1)       = link2 ∘ link1  [WRONG]
+    ///   transforms[0] = transforms[1].composed(with: link3)       = ...            [WRONG]
+    ///
+    /// Mutation sensitivity at transforms[1]:
+    ///   correct  link1∘link2 tx = scale1*tx2 + tx1 = 1.5*(-4) + 3 = -3.0
+    ///   wrong    link2∘link1 tx = scale2*tx1 + tx2 = 0.7*3 + (-4) = -1.9
+    ///   diff = 1.1 px >> 1e-4 tolerance.
+    func testAccumulateLinksDownSweepOrderIsLinkComposedWithNext() {
+        let link1 = Transform2D.similarity(scale: 1.5, rotation: 0, tx:  3.0, ty: 0)
+        let link2 = Transform2D.similarity(scale: 0.7, rotation: 0, tx: -4.0, ty: 0)
+        let link3 = Transform2D.similarity(scale: 1.2, rotation: 0, tx:  2.0, ty: 0)
+
+        // links[3] = .identity is at the reference; links[2,1,0] are non-trivial.
+        // For the down-sweep, links[i] maps frame[i+1] coords → frame[i] coords.
+        let links: [Transform2D] = [link3, link1, link2, .identity]
+        let referenceIndex = links.count - 1   // = 3
+
+        // Correct accumulated transforms:
+        //   t[3] = .identity
+        //   t[2] = link2 ∘ .identity = link2
+        //   t[1] = link1 ∘ t[2]      = link1 ∘ link2
+        //   t[0] = link3 ∘ t[1]      = link3 ∘ link1 ∘ link2
+        let t2_want = link2                                  // link2 ∘ identity
+        let t1_want = link1.composed(with: link2)           // link1 ∘ link2
+        let t0_want = link3.composed(with: t1_want)         // link3 ∘ link1 ∘ link2
+
+        // Wrong (transposed: transforms[i+1].composed(with: links[i])):
+        //   t[2] = .identity ∘ link2          = link2  (trivially same as correct)
+        //   t[1] = link2 ∘ link1              [WRONG — reversed]
+        //   t[0] = (link2 ∘ link1) ∘ link3   [WRONG — accumulated reversed]
+        let t1_wrong = link2.composed(with: link1)
+
+        // Verify the fixture is non-degenerate: the two orderings of t[1] differ by > 1 px.
+        XCTAssertGreaterThan(abs(t1_want.tx - t1_wrong.tx), 1.0,
+            "t1_want and t1_wrong must differ by > 1 px — fixture is degenerate")
+
+        let result = AffineAligner.accumulateLinks(links, referenceIndex: referenceIndex)
+
+        XCTAssertEqual(result[referenceIndex], .identity)
+
+        // t[2]: both orderings trivially agree (link ∘ identity = identity ∘ link = link).
+        XCTAssertEqual(result[2].tx, t2_want.tx, accuracy: 1e-4, "t[2] tx")
+        XCTAssertEqual(result[2].a,  t2_want.a,  accuracy: 1e-4, "t[2] scale")
+
+        // t[1]: correct = link1 ∘ link2; wrong = link2 ∘ link1 → diff = 1.1 px.
+        XCTAssertEqual(result[1].tx, t1_want.tx, accuracy: 1e-4,
+            "t[1] tx must be link1∘link2 not link2∘link1 (catches transposed down-sweep loop)")
+        XCTAssertNotEqual(result[1].tx, t1_wrong.tx,
+            "t[1] correct and wrong must be distinguishable")
+
+        // t[0]: accumulated error grows further.
+        XCTAssertEqual(result[0].tx, t0_want.tx, accuracy: 1e-4,
+            "t[0] tx must follow correct down-sweep composition chain")
+    }
+
+    // MARK: - Part A: bounds-fallback tests
+
+    /// A 4°-per-step rotation (0.07 rad) is far outside the 1° default bound.
+    /// `boundedLink` must reject the similarity fit and fall back to translation-only,
+    /// so the resulting transform has scale = 1, rotation = 0.
+    func testImplausibleLinkFallsBackToTranslationOnly() {
+        let (frames, _) = chainBracketFrames(w: 96, h: 64,
+                                             steps: [.similarity(scale: 1.0, rotation: 0.07, tx: 0, ty: 0)])
+        let p = params(AffineAligner.alignChain(frames, referenceIndex: 0)[1])
+        XCTAssertEqual(p.scale, 1, accuracy: 1e-4, "fallback link must carry no scale")
+        XCTAssertEqual(p.rot, 0,   accuracy: 1e-4, "fallback link must carry no rotation")
+    }
+
+    /// Same frames as `testImplausibleLinkFallsBackToTranslationOnly`, but with bounds wide
+    /// enough to accept a 4° rotation. The similarity fit is now accepted, proving it was the
+    /// BOUNDS (not the estimator) that gated the previous test.
+    func testWideBoundsAcceptTheSameLink() {
+        let (frames, drifts) = chainBracketFrames(w: 96, h: 64,
+                                                  steps: [.similarity(scale: 1.0, rotation: 0.07, tx: 0, ty: 0)])
+        // maxRotationRadians: 0.2 rad (~11.5°) — wide enough to accept the 4° (0.07 rad) rotation.
+        // maxTranslationFraction / maxScaleDelta are also widened to avoid spurious rejection.
+        let wide = ChainBounds(maxScaleDelta: 0.5, maxRotationRadians: 0.2,
+                               maxTranslationFraction: 0.2, robustClip: nil)
+        let p = params(AffineAligner.alignChain(frames, referenceIndex: 0, bounds: wide)[1])
+        // drifts[1] = steps[0], so its inverse has rotation = -0.07 rad.
+        let wantRot = params(drifts[1].inverse).rot   // ≈ -0.07
+        XCTAssertEqual(p.rot, wantRot, accuracy: 0.02,
+                       "with wide bounds the rotation must be recovered (estimator accepted by wide ChainBounds)")
     }
 }
