@@ -385,6 +385,8 @@ Look-tagged thumbnail grid; tap → result + metadata + edit/share/export/delete
 - **Onboarding:** camera/photos permissions + a short look explainer with sample shots.
 - **Settings:** default export format (JPEG/HEIC), save-to-Photos toggle, default RAW on/off, grid/level, max session length, storage management, "What your device supports" (capability report), replay onboarding, about.
 
+> **Implementation status (2026-06-10).** Onboarding (permissions pre-prompt + look explainer with stylized cards) and Settings shipped with the Settings+Onboarding PR: default export format (JPEG/HEIC, wired capture-time), save-to-Photos (add-only auto-export), storage management, "What your device supports" (RAW + manual-focus/Depth), replay onboarding, about. Deliberately NOT shipped, awaiting their underlying features: **default RAW on/off** (blocked on the YUV/HEIC capture fallback, §10.2), **grid/level** (the overlay feature doesn't exist), **max session length** (superseded by the capture screen's burst sliders, hard-capped at 60 s).
+
 ---
 
 ## 16. Performance, memory & thermal budget
