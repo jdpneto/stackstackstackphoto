@@ -19,6 +19,9 @@ final class StackCaptureCoordinator: ObservableObject {
     @Published private(set) var lastSavedID: UUID?
     /// The most recent failure message (capture or processing); cleared when a new shot starts.
     @Published private(set) var lastError: String?
+    /// Whether the camera can run a Depth focus sweep (manual-focus hardware). Optimistic `true`
+    /// until the preview configures the session; the UI disables the Depth chip when false.
+    @Published private(set) var supportsDepth = true
     /// True while AF/AE are locked via a long-press on the preview (drives the "AE/AF LOCK" banner).
     @Published private(set) var aeAfLocked = false
     /// Live capture progress (drives the on-screen counter + countdown during the burst).
@@ -65,7 +68,12 @@ final class StackCaptureCoordinator: ObservableObject {
     var isBusy: Bool { isCapturing || processingCount > 0 }
 
     /// Start the live preview and return its layer (nil if unavailable, e.g. the Simulator fake).
-    func startPreview() async -> CALayer? { await capture.startPreview() }
+    /// Also the earliest point the device capability probe is meaningful (session configured).
+    func startPreview() async -> CALayer? {
+        let layer = await capture.startPreview()
+        supportsDepth = capture.supportsDepthOfField
+        return layer
+    }
 
     /// Tap-to-focus is available only in full-auto exposure/focus (no manual Pro override) and while
     /// the shutter is free. (design tap-to-focus §3.3)
@@ -95,14 +103,14 @@ final class StackCaptureCoordinator: ObservableObject {
         captureRemainingSeconds = Int(ceil(recipe.durationSeconds))
         startCaptureCountdown()
         let gating: @Sendable () -> Bool
-        if mode.isLongExposure {
+        if mode.usesSteadinessGate {
             steadiness.start()
             gating = { [steadiness] in steadiness.isSteady }
         } else {
             gating = { true }
         }
         defer {
-            if mode.isLongExposure { steadiness.stop() }
+            if mode.usesSteadinessGate { steadiness.stop() }
             countdownTask?.cancel(); countdownTask = nil
             captureRemainingSeconds = 0   // don't leave a stale value between shots
         }
@@ -205,6 +213,10 @@ final class StackCaptureCoordinator: ObservableObject {
     /// frames to this before align/stack is the dominant speed + memory win (results stay sharp at
     /// screen/share sizes). A full-resolution Pro tier is a follow-up.
     nonisolated private static let managedWorkingResolution = 2400
+    /// Depth working resolution (long-edge px). Lower than the 2400 the other looks use: DoF holds
+    /// ALL brackets + Laplacian pyramids + weight masks at once (~700 MB at 1500 px for 10 brackets
+    /// vs ~1.8 GB at 2400 px, which flirts with the ~3 GB jetsam limit). (spec 2026-06-10 §4.4)
+    nonisolated private static let depthWorkingResolution = 1500
 
     /// DEBUG: dump the developed frames (the exact alignment input) for one capture so the handheld
     /// registration can be debugged offline on real data. Off for release; remove before merge.
@@ -221,6 +233,18 @@ final class StackCaptureCoordinator: ObservableObject {
                 result = try Pipeline.reduceStreaming(frames, mode: mode,
                                                       workingResolution: managedWorkingResolution,
                                                       binnedDevelop: true, shouldCancel: shouldCancel)
+            } else if mode == .depthOfField {
+                // Depth: develop all brackets at the managed depth resolution, then focus-stack.
+                // maxFrames follows the actual capture (the recipe already capped it). (spec §6)
+                let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
+                                                         workingResolution: depthWorkingResolution)
+                if shouldCancel() { throw CancellationError() }
+                guard let stacked = FocusStacker.allInFocus(
+                    developed,
+                    config: DepthConfig(workingResolution: depthWorkingResolution,
+                                        maxFrames: max(frames.count, 1)))
+                else { throw ProcessingError.focusStackFailed }
+                result = stacked
             } else {
                 let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
                                                          workingResolution: managedWorkingResolution)
@@ -247,6 +271,16 @@ final class StackCaptureCoordinator: ObservableObject {
             guard let data = try? ImageEncoder.encode(rgba8: rgba, width: img.width, height: img.height,
                                                       format: .jpeg, quality: 0.95) else { continue }
             try? data.write(to: dir.appendingPathComponent(String(format: "frame%02d.jpg", i)))
+        }
+    }
+}
+
+/// Background-processing failures surfaced to the capture screen's status label.
+enum ProcessingError: LocalizedError {
+    case focusStackFailed
+    var errorDescription: String? {
+        switch self {
+        case .focusStackFailed: return "Couldn't combine the focus brackets. Please try again."
         }
     }
 }
