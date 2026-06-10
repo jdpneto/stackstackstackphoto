@@ -27,4 +27,35 @@ final class FakeCaptureServiceTests: XCTestCase {
         }
         XCTAssertGreaterThan(trailsMax, smoothMax, "light trails must keep the moving highlight brighter than smooth motion")
     }
+
+    func testFocusSweepRecipeProducesDistinctOrderedBrackets() async throws {
+        let svc = FakeCaptureService(width: 32, height: 16)
+        let recipe = CaptureRecipe.recipe(for: .depthOfField).applying(ProControls(frameCount: 4))
+        let frames = try await svc.captureBurst(recipe: recipe)
+        XCTAssertEqual(frames.count, 4)
+        // Each bracket is sharp in a different band → mosaics must differ pairwise.
+        for i in 0..<frames.count {
+            for j in (i + 1)..<frames.count {
+                XCTAssertNotEqual(frames[i].mosaic, frames[j].mosaic,
+                                  "bracket \(i) and \(j) must differ (different sharp band)")
+            }
+        }
+    }
+
+    func testFocusSweepReportsProgressPerBracket() async throws {
+        let svc = FakeCaptureService(width: 32, height: 16)
+        let recipe = CaptureRecipe.recipe(for: .depthOfField).applying(ProControls(frameCount: 3))
+        let counter = ProgressCounter()
+        _ = try await svc.captureBurst(recipe: recipe, isSteady: { true },
+                                       onProgress: { n in Task { await counter.record(n) } })
+        // Give the recording tasks a beat to land.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let seen = await counter.values
+        XCTAssertEqual(seen, [1, 2, 3])
+    }
+}
+
+private actor ProgressCounter {
+    private(set) var values: [Int] = []
+    func record(_ n: Int) { values.append(n) }
 }
