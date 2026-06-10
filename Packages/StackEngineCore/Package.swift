@@ -9,6 +9,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "StackEngineCore"),
-        .testTarget(name: "StackEngineCoreTests", dependencies: ["StackEngineCore"])
+        .testTarget(name: "StackEngineCoreTests", dependencies: ["StackEngineCore"],
+                    resources: [.copy("Resources")])
     ]
 )
