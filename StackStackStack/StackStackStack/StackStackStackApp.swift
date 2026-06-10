@@ -8,6 +8,13 @@ struct StackStackStackApp: App {
     @StateObject private var settings = AppSettings()
     @State private var showOnboarding = false
 
+    init() {
+        // UI-test hook: a fresh-install run (defaults are otherwise sticky per simulator install).
+        if ProcessInfo.processInfo.arguments.contains("-resetOnboarding") {
+            UserDefaults.standard.removeObject(forKey: "hasSeenOnboarding")
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
             TabView {
@@ -26,9 +33,14 @@ struct StackStackStackApp: App {
             .onAppear {
                 coordinator.exportFormat = settings.exportFormat
                 coordinator.saveToPhotosEnabled = settings.saveToPhotos
+                if !settings.hasSeenOnboarding { showOnboarding = true }
             }
             .onReceive(settings.$exportFormat) { coordinator.exportFormat = $0 }
             .onReceive(settings.$saveToPhotos) { coordinator.saveToPhotosEnabled = $0 }
+            .fullScreenCover(isPresented: $showOnboarding) {
+                OnboardingView(isPresented: $showOnboarding)
+                    .environmentObject(settings)
+            }
         }
     }
 
