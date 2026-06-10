@@ -237,4 +237,25 @@ final class CoordinatorTests: XCTestCase {
         _ = await coord.startPreview()
         XCTAssertTrue(coord.supportsDepth, "the fake always supports a focus sweep")
     }
+
+    @MainActor
+    func testShootHonoursExportFormat() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.exportFormat = .heic
+        await coord.shoot()
+        await coord.awaitProcessing()
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(rec.encoderFormat, .heic)
+        XCTAssertEqual(store.resultURL(for: rec).pathExtension, "heic")
+        // The bytes really are HEIC: they decode, and re-encoding as HEIC is what produced them.
+        XCTAssertNotNil(ImageDecoder.rgba8(from: try Data(contentsOf: store.resultURL(for: rec)), maxPixel: nil))
+    }
+
+    @MainActor
+    func testDefaultFormatIsJPEG() async throws {
+        let (coord, store) = makeCoordinator()
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertEqual(try XCTUnwrap(store.loadAll().first).encoderFormat, .jpeg)
+    }
 }
