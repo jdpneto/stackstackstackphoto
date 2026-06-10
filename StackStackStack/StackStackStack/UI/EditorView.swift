@@ -18,14 +18,20 @@ struct EditorView: View {
     @State private var isSaving = false
     @State private var saveError = false
 
+    /// Resolved once: the record's format can't change while the editor is open.
+    private let recordFormat: ImageEncoder.Format
+
     /// Adjustments + an initial downscaled preview are loaded OFF the main thread by the presenter
     /// and passed in, so the editor's init/body do no synchronous disk reads or full-res decodes.
+    /// `recordFormat` is supplied by the caller (already resolved off-main by the presenter) so the
+    /// editor init never touches the index.
     init(originalJPEG: Data, initialAdjustments: ImageAdjustments, initialPreview: UIImage?,
-         recordId: UUID, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
+         recordId: UUID, recordFormat: ImageEncoder.Format, store: LibraryStore, onSaved: @escaping (Data) -> Void) {
         self.originalJPEG = originalJPEG
         self.recordId = recordId
         self.store = store
         self.onSaved = onSaved
+        self.recordFormat = recordFormat
         _adj = State(initialValue: initialAdjustments)
         _preview = State(initialValue: initialPreview)
     }
@@ -83,10 +89,10 @@ struct EditorView: View {
         renderTask?.cancel()
         generation += 1
         let gen = generation
-        let current = adj, jpeg = originalJPEG
+        let current = adj, jpeg = originalJPEG, fmt = recordFormat
         renderTask = Task {
             let data = await Task.detached(priority: .userInitiated) {
-                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200)
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.85, maxPixel: 1200, format: fmt)
             }.value
             // Drop a stale render: a newer schedulePreview (higher generation) or a cancel supersedes it.
             if Task.isCancelled || gen != generation { return }
@@ -97,15 +103,15 @@ struct EditorView: View {
     private func save() {
         guard !isSaving else { return }   // reject a re-entrant Save while one is in flight
         isSaving = true
-        let current = adj, jpeg = originalJPEG, theStore = store, id = recordId
+        let current = adj, jpeg = originalJPEG, theStore = store, id = recordId, fmt = recordFormat
         Task {
             let rendered = await Task.detached(priority: .userInitiated) {
-                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.95)
+                ResultRenderer.render(originalJPEG: jpeg, adjustments: current, quality: 0.95, format: fmt)
             }.value
             isSaving = false
             guard let rendered else { saveError = true; return }   // don't claim success on a failed render
             do {
-                try theStore.applyEdit(id: id, adjustments: current, renderedJPEG: rendered)
+                try theStore.applyEdit(id: id, adjustments: current, rendered: rendered)
             } catch {
                 saveError = true
                 return

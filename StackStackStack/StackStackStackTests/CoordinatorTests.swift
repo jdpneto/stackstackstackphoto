@@ -237,4 +237,97 @@ final class CoordinatorTests: XCTestCase {
         _ = await coord.startPreview()
         XCTAssertTrue(coord.supportsDepth, "the fake always supports a focus sweep")
     }
+
+    @MainActor
+    func testShootHonoursExportFormat() async throws {
+        // Hosts without an HEVC encoder (Intel-Mac simulators) can't produce HEIC at all — the
+        // coordinator's JPEG fallback is then correct behavior, not a format bug. Skip there.
+        let probe = try? ImageEncoder.encode(rgba8: [0, 0, 0, 255], width: 1, height: 1, format: .heic, quality: 0.9)
+        try XCTSkipIf(probe == nil, "host cannot encode HEIC")
+
+        let (coord, store) = makeCoordinator()
+        coord.exportFormat = .heic
+        await coord.shoot()
+        await coord.awaitProcessing()
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(rec.encoderFormat, .heic)
+        XCTAssertEqual(store.resultURL(for: rec).pathExtension, "heic")
+        // The bytes really are HEIC: they decode, and re-encoding as HEIC is what produced them.
+        XCTAssertNotNil(ImageDecoder.rgba8(from: try Data(contentsOf: store.resultURL(for: rec)), maxPixel: nil))
+        let bytes = try Data(contentsOf: store.resultURL(for: rec))
+        XCTAssertNotEqual(bytes.prefix(3), Data([0xFF, 0xD8, 0xFF]), "saved bytes must not be JPEG magic when the record says HEIC")
+    }
+
+    @MainActor
+    func testHEICEncodeFailureFallsBackToJPEG() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.exportFormat = .heic
+        coord.encodeImage = { rgba, w, h, format, quality in
+            if format == .heic { throw ImageEncoderError.finalizeFailed }   // simulate an encoder hiccup
+            return try ImageEncoder.encode(rgba8: rgba, width: w, height: h, format: format, quality: quality)
+        }
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNil(coord.lastError, "fallback must not surface an error")
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(rec.encoderFormat, .jpeg, "record stamped with the format actually encoded")
+        XCTAssertEqual(try Data(contentsOf: store.resultURL(for: rec)).prefix(3), Data([0xFF, 0xD8, 0xFF]))
+    }
+
+    @MainActor
+    func testDefaultFormatIsJPEG() async throws {
+        let (coord, store) = makeCoordinator()
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertEqual(try XCTUnwrap(store.loadAll().first).encoderFormat, .jpeg)
+    }
+
+    // MARK: - Task 5: Photos auto-export
+
+    @MainActor
+    func testPhotosExportRunsOnlyWhenEnabled() async throws {
+        let exported = ExportLog()
+        let (coord, _) = makeCoordinator()
+        coord.photosExporter = { data, _ in await exported.record(data.count) }
+        await coord.shoot()                       // saveToPhotosEnabled defaults to false
+        await coord.awaitProcessing()
+        let countDisabled = await exported.count
+        XCTAssertEqual(countDisabled, 0, "no export when the toggle is off")
+        coord.saveToPhotosEnabled = true
+        await coord.shoot()
+        await coord.awaitProcessing()
+        try await Task.sleep(nanoseconds: 200_000_000)   // export is fire-and-forget
+        let countEnabled = await exported.count
+        XCTAssertEqual(countEnabled, 1, "one export per save when enabled")
+        XCTAssertNil(coord.photosExportNote)
+    }
+
+    @MainActor
+    func testPhotosExportFailureIsNonBlocking() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.saveToPhotosEnabled = true
+        coord.photosExporter = { _, _ in throw CaptureError.busy }   // any error
+        await coord.shoot()
+        await coord.awaitProcessing()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(try store.loadAll().count, 1, "in-app save unaffected")
+        XCTAssertNotNil(coord.photosExportNote, "failure surfaces as a note, not an error")
+        XCTAssertNil(coord.lastError)
+    }
+
+    // MARK: - Task 6: RAW capability probe
+
+    @MainActor
+    func testSupportsRAWIsTrueWithTheFake() async {
+        let (coord, _) = makeCoordinator()
+        _ = await coord.startPreview()
+        XCTAssertTrue(coord.supportsRAW)
+    }
+}
+
+// MARK: - Helpers
+
+private actor ExportLog {
+    private(set) var count = 0
+    func record(_ n: Int) { count += 1 }
 }

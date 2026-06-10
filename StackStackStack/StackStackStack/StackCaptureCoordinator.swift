@@ -22,6 +22,9 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Whether the camera can run a Depth focus sweep (manual-focus hardware). Optimistic `true`
     /// until the preview configures the session; the UI disables the Depth chip when false.
     @Published private(set) var supportsDepth = true
+    /// Whether the camera vends Bayer RAW frames the engine can decode. Optimistic `true`
+    /// until the preview configures the session; displayed in the Settings capability report.
+    @Published private(set) var supportsRAW = true
     /// True while AF/AE are locked via a long-press on the preview (drives the "AE/AF LOCK" banner).
     @Published private(set) var aeAfLocked = false
     /// Live capture progress (drives the on-screen counter + countdown during the burst).
@@ -42,6 +45,19 @@ final class StackCaptureCoordinator: ObservableObject {
     }
     /// User burst length/window for the long-exposure looks (ignored by the static looks).
     @Published var burst: BurstSettings = .default
+    /// Library/encode format for new captures. Kept in sync from AppSettings by the app root —
+    /// the coordinator stays ignorant of the settings object. Snapshotted at shutter press. (spec §4)
+    var exportFormat: ImageEncoder.Format = .jpeg
+    /// Mirror saves into the system photo library (Settings toggle; synced by the app root). (spec §5)
+    var saveToPhotosEnabled = false
+    /// The export function — injectable so tests don't touch the real photo library. (spec §5)
+    var photosExporter: @Sendable (Data, ImageEncoder.Format) async throws -> Void = PhotoLibraryExporter.export
+    /// Non-blocking note when a Photos export fails (the in-app save already succeeded). (spec §5)
+    @Published private(set) var photosExportNote: String?
+    /// Injectable encode — tests can swap this to force an encoder failure and exercise the HEIC→JPEG
+    /// fallback path without touching the real ImageEncoder. (spec §8)
+    var encodeImage: @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data =
+        { try ImageEncoder.encode(rgba8: $0, width: $1, height: $2, format: $3, quality: $4) }
     /// Handheld-steadiness tracker for the long-exposure looks; observed by the capture overlay and
     /// read by the capture gate. (design 2026-06-07 §8)
     let steadiness = MotionSteadiness()
@@ -72,6 +88,7 @@ final class StackCaptureCoordinator: ObservableObject {
     func startPreview() async -> CALayer? {
         let layer = await capture.startPreview()
         supportsDepth = capture.supportsDepthOfField
+        supportsRAW = capture.supportsRAWCapture
         return layer
     }
 
@@ -91,10 +108,14 @@ final class StackCaptureCoordinator: ObservableObject {
     func shoot() async {
         guard !isBusy else { return }   // reject a rapid double-tap, and a shot during the background stack
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
+        let format = self.exportFormat       // capture the format at shutter-press time
+        let exportToPhotos = self.saveToPhotosEnabled   // snapshot the toggle at shutter-press time
+        let encode = self.encodeImage        // snapshot the encode hook at shutter-press time
         // UIDevice.current.orientation is main-thread-only; safe here (coordinator is @MainActor, shoot runs on it).
         let orientationTurns = CaptureOrientation.quarterTurns(for: UIDevice.current.orientation)
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
+        photosExportNote = nil               // clear any prior export failure note
         aeAfLocked = false                   // a long-press lock is superseded once a shot begins
         let recipe = makeRecipe(for: mode)
         isCapturing = true
@@ -127,7 +148,9 @@ final class StackCaptureCoordinator: ObservableObject {
         }
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
         guard !frames.isEmpty else { lastError = "No frames were captured."; return }
-        enqueueProcessing(frames: frames, mode: mode, orientationQuarterTurns: orientationTurns)
+        enqueueProcessing(frames: frames, mode: mode, format: format,
+                          orientationQuarterTurns: orientationTurns, exportToPhotos: exportToPhotos,
+                          encode: encode)
     }
 
     /// Clear the on-screen result preview, returning the capture screen to the live viewfinder.
@@ -167,7 +190,10 @@ final class StackCaptureCoordinator: ObservableObject {
 
     /// Queue develop→align→stack→encode→save behind any earlier job (serial), running the heavy work
     /// off the MainActor, then publish the result. The shutter stays free meanwhile.
-    private func enqueueProcessing(frames: [RawSensorFrame], mode: StackMode, orientationQuarterTurns: Int) {
+    private func enqueueProcessing(frames: [RawSensorFrame], mode: StackMode,
+                                   format: ImageEncoder.Format, orientationQuarterTurns: Int,
+                                   exportToPhotos: Bool,
+                                   encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) {
         processingCount += 1
         let token = CancellationToken()
         activeTokens.append(token)
@@ -181,13 +207,26 @@ final class StackCaptureCoordinator: ObservableObject {
             }
             if token.isCancelled { return }                        // cancelled while queued
             do {
-                let jpeg = try await Self.makeJPEG(from: frames, mode: mode,
-                                                   orientationQuarterTurns: orientationQuarterTurns,
-                                                   shouldCancel: { token.isCancelled })
+                // makeResult handles the HEIC→JPEG fallback internally; the develop+align+stack
+                // pipeline is never re-run on a fallback, only the encode step. (spec §8)
+                let encoded = try await Self.makeResult(from: frames, mode: mode, format: format,
+                                                        orientationQuarterTurns: orientationQuarterTurns,
+                                                        shouldCancel: { token.isCancelled },
+                                                        encode: encode)
                 if token.isCancelled { return }                    // cancelled during processing → discard
-                let saved = try self.store.save(resultJPEG: jpeg, mode: mode.rawValue, frameCount: frames.count)
-                self.lastResultJPEG = jpeg
+                let saved = try self.store.save(result: encoded.data, format: encoded.format,
+                                                mode: mode.rawValue, frameCount: frames.count)
+                // `lastResultJPEG` keeps its historical name; it stores display bytes — ImageIO decodes both JPEG and HEIC.
+                self.lastResultJPEG = encoded.data
                 self.lastSavedID = saved.id
+                if exportToPhotos {
+                    let exporter = self.photosExporter
+                    let payload = encoded
+                    Task { [weak self] in   // fire-and-forget; never blocks or fails the in-app save
+                        do { try await exporter(payload.data, payload.format) }
+                        catch { await MainActor.run { self?.photosExportNote = "Photos export failed — check Settings ▸ Privacy" } }
+                    }
+                }
             } catch is CancellationError {
                 return                                             // discarded mid-stack — not an error
             } catch {
@@ -222,9 +261,13 @@ final class StackCaptureCoordinator: ObservableObject {
     nonisolated private static let dumpFramesForDiagnostics = false
 
     /// CPU-heavy develop → downscale → align → stack → encode, run off the MainActor.
-    nonisolated private static func makeJPEG(from frames: [RawSensorFrame], mode: StackMode,
-                                             orientationQuarterTurns: Int,
-                                             shouldCancel: @escaping @Sendable () -> Bool) async throws -> Data {
+    /// Returns `(data, format)` where format may differ from the requested format if HEIC encoding
+    /// failed and fell back to JPEG — only the encode step is retried, not the full pipeline. (spec §8)
+    nonisolated private static func makeResult(from frames: [RawSensorFrame], mode: StackMode,
+                                               format: ImageEncoder.Format,
+                                               orientationQuarterTurns: Int,
+                                               shouldCancel: @escaping @Sendable () -> Bool,
+                                               encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) async throws -> (data: Data, format: ImageEncoder.Format) {
         try await Task.detached(priority: .userInitiated) {
             let result: PixelImage
             if mode.isLongExposure {
@@ -252,10 +295,19 @@ final class StackCaptureCoordinator: ObservableObject {
                 if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
                 result = Pipeline.reduceImages(developed, mode: mode)   // already at working resolution
             }
+            // All cancellation checks precede the encode — a CancellationError here is from the
+            // pipeline above, not the encode, so the where-clause below can't swallow one mid-encode.
             let oriented = ImageGeometry.rotated(result, quarterTurns: orientationQuarterTurns)   // bake upright
             let rgba = OutputTransform.encodeSRGB8(oriented)
-            return try ImageEncoder.encode(rgba8: rgba, width: oriented.width, height: oriented.height,
-                                           format: .jpeg, quality: 0.95)
+            do {
+                let data = try encode(rgba, oriented.width, oriented.height, format, 0.95)
+                return (data, format)
+            } catch where format == .heic {
+                // HEIC encoder hiccup → re-encode the SAME stacked pixels as JPEG; the pipeline
+                // (develop+align+stack) is never re-run. (spec §8)
+                let data = try encode(rgba, oriented.width, oriented.height, .jpeg, 0.95)
+                return (data, .jpeg)
+            }
         }.value
     }
 

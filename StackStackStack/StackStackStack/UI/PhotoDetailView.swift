@@ -24,6 +24,7 @@ struct PhotoDetailView: View {
         let original: Data
         let adjustments: ImageAdjustments
         let preview: UIImage?
+        let format: ImageEncoder.Format
     }
 
     var body: some View {
@@ -72,7 +73,8 @@ struct PhotoDetailView: View {
         }
         .sheet(item: $editSource) { src in
             EditorView(originalJPEG: src.original, initialAdjustments: src.adjustments,
-                       initialPreview: src.preview, recordId: src.id, store: store) { renderedJPEG in
+                       initialPreview: src.preview, recordId: src.id, recordFormat: src.format,
+                       store: store) { renderedJPEG in
                 image = UIImage(data: renderedJPEG)   // reflect the edit in the viewer
                 onChanged()                           // and refresh the gallery (updatedAt bumped)
             }
@@ -88,16 +90,17 @@ struct PhotoDetailView: View {
     private func openEditor() {
         let id = record.id
         let lib = store
+        let fmt = record.encoderFormat   // the record's own format (spec §4: never the current setting)
         Task {
             let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, ImageAdjustments, Data?)? in
                 guard let data = lib.originalData(for: id) else { return nil }
                 let adj = lib.adjustments(for: id)
-                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200)
+                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200, format: fmt)
                 return (data, adj, prev)
             }.value
             guard let (data, adj, prevData) = loaded else { return }
             editSource = EditSource(id: id, original: data, adjustments: adj,
-                                    preview: prevData.flatMap { UIImage(data: $0) })
+                                    preview: prevData.flatMap { UIImage(data: $0) }, format: fmt)
         }
     }
 
@@ -107,13 +110,14 @@ struct PhotoDetailView: View {
         guard !rotating else { return }
         rotating = true
         let id = record.id, lib = store
+        let fmt = record.encoderFormat   // the record's own format (spec §4: never the current setting)
         Task {
             let result: (ImageAdjustments, Data)? = await Task.detached(priority: .userInitiated) {
                 // originalData and adjustments are safe to read off the main thread (file I/O only).
                 guard let original = lib.originalData(for: id) else { return nil }
                 var adj = lib.adjustments(for: id)
                 adj.quarterTurns += delta   // ImageAdjustments normalizes into 0…3 via its didSet
-                guard let rendered = ResultRenderer.render(originalJPEG: original, adjustments: adj, quality: 0.95)
+                guard let rendered = ResultRenderer.render(originalJPEG: original, adjustments: adj, quality: 0.95, format: fmt)
                 else { return nil }
                 return (adj, rendered)
             }.value
@@ -122,7 +126,7 @@ struct PhotoDetailView: View {
             do {
                 // applyEdit is a write (read-modify-write on index.json) — must be MainActor-confined.
                 // The enclosing Task inherits the MainActor from the SwiftUI action that called rotate(by:).
-                try lib.applyEdit(id: id, adjustments: adj, renderedJPEG: rendered)
+                try lib.applyEdit(id: id, adjustments: adj, rendered: rendered)
                 image = UIImage(data: rendered)   // reflect in the viewer
                 onChanged()                        // refresh the gallery
             } catch { /* transient render/save failure: leave the current image */ }
