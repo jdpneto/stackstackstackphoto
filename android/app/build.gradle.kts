@@ -25,6 +25,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Debug-keystore signing so local Release builds install on a dev device.
+            // The engine is unusably slow in debuggable builds (ART disables optimization);
+            // on-device verification must run the Release build — same finding as iOS.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

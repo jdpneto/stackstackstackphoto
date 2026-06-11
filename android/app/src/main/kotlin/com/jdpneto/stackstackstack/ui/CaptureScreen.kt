@@ -13,6 +13,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -249,11 +250,18 @@ fun CaptureScreen(
             // Result preview or look label.
             resultBitmap?.let { bmp ->
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    // iOS uses `.resizable().scaledToFit()` between Spacers, so SwiftUI gives the
+                    // preview only the space left over by the controls. Compose doesn't negotiate
+                    // that way: an unconstrained fillMaxWidth Image takes its full scaled height
+                    // (a portrait result in landscape ≈ 3000+ px), zero-sizing every control below
+                    // it (live device finding). Cap the height so the control stack always fits.
                     androidx.compose.foundation.Image(
                         bitmap = bmp.asImageBitmap(),
                         contentDescription = "Result preview",
+                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .heightIn(max = 180.dp)
                             .padding(horizontal = 16.dp)
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

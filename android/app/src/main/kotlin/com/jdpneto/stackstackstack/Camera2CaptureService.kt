@@ -386,6 +386,7 @@ class Camera2CaptureService(
         val frameCount = recipe.frameCount
         val pacingInterval = max(recipe.durationSeconds / max(frameCount - 1, 1).toDouble(), 0.05)
         val frameTimeout   = (max(recipe.manualShutterSeconds ?: 0.0, 1.0) * 3 + 4.0) * 1_000L
+        Log.i(TAG, "burst: start frames=$frameCount raw=$_supportsRAWCapture pacing=${pacingInterval}s")
 
         return suspendCancellableCoroutine { cont ->
             stateExecutor.execute {
@@ -431,6 +432,7 @@ class Camera2CaptureService(
                             }
                         }
                     }
+                    Log.i(TAG, "burst: armed gen=$gen")
                     // Drop any join-half left over from an aborted previous burst.
                     imageHandler.post { clearJoinState() }
                     // Lock AE/AF/AWB once for the whole burst, then start frame 1.
@@ -458,10 +460,12 @@ class Camera2CaptureService(
      * WB drifted across the burst. Runs on [sessionExecutor]; proceeds exactly once.
      */
     private fun lockForBurstThenStart(gen: Int, recipe: CaptureRecipe) {
+        Log.i(TAG, "lock: begin gen=$gen")
         val proceeded = AtomicBoolean(false)
         fun proceed(warn: String?) {
             if (!proceeded.compareAndSet(false, true)) return
             warn?.let { Log.w(TAG, it) }
+            Log.i(TAG, "lock: proceeding to frame 1")
             try {
                 stateExecutor.execute { stateLock.withLock { startNextFrameLocked(gen) } }
             } catch (_: RejectedExecutionException) {}
@@ -549,6 +553,7 @@ class Camera2CaptureService(
         val preview = previewSurface
         if (stale) return
         if (session == null || device == null || preview == null) { proceed(null); return }
+        Log.i(TAG, "lock: engaging burst hold (iso=$meteredIso ns=$meteredExposureNs lens=$lockedLensDiopters)")
         try {
             val hold = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(preview)
@@ -640,6 +645,7 @@ class Camera2CaptureService(
                 }
                 req.addTarget(targetSurface)
                 session.capture(req.build(), callback, imageHandler)
+                Log.i(TAG, "frame ${frameIndex + 1}/$totalFrames submitted (token=$token)")
             } catch (e: Exception) {
                 Log.w(TAG, "capture submit failed for frame $frameIndex (frame dropped)", e)
                 stateExecutor.execute { stateLock.withLock { advanceLocked(token) } }
@@ -926,6 +932,7 @@ class Camera2CaptureService(
     /** Resume the continuation exactly once and reset per-burst state. Must run on stateExecutor. */
     private fun finishLocked() {
         val cont = continuation ?: return
+        Log.i(TAG, "finish: raw=${pendingRaw.size} dev=${pendingDeveloped.size} joined=$joined/$expectedJoins")
         continuation    = null
         inFlightToken   = NO_TOKEN
         activeRecipe    = null

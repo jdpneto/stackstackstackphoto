@@ -403,7 +403,9 @@ class StackCaptureCoordinator(
 
         val capturedBurst: CapturedBurst
         try {
+            android.util.Log.i("SSSCoord", "shoot: mode=$mode frames=${recipe.frameCount} gate=${mode.usesSteadinessGate}")
             capturedBurst = capture.captureBurst(recipe = recipe, isSteady = isSteady, onProgress = onProgress)
+            android.util.Log.i("SSSCoord", "shoot: burst returned count=${capturedBurst.count}")
         } catch (e: Exception) {
             // State only — resource cleanup (steadiness + countdown) is owned by `finally` below,
             // which runs before this `return` completes.
