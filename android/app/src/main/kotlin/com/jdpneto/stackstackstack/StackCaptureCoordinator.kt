@@ -635,29 +635,33 @@ class StackCaptureCoordinator(
         const val MANAGED_WORKING_RESOLUTION = 2400
 
         /**
-         * Quality floor (long-edge px) for the heap-derived working resolution — below this the
-         * output stops looking like a photo upgrade. A stack that doesn't fit even at the floor
-         * proceeds at the floor (best effort) rather than refusing the shot.
+         * Quality floor (long-edge px) for the heap-derived working-resolution BUDGET — below this
+         * the output stops looking like a photo upgrade. A stack that doesn't fit even at the floor
+         * proceeds at the floor (best effort) rather than refusing the shot. NOTE: the engine's
+         * downscale is repeated 2× halving (it cannot hit an arbitrary target), so the ACHIEVED
+         * edge ([achievableWorkingResolution]) can land below this floor when the source's nearest
+         * halving step undershoots it — the next step up would not fit the heap budget.
          */
         const val MIN_WORKING_RESOLUTION = 1200
 
         /**
          * Largest working long edge whose BATCH stack fits in half the Java heap.
          *
-         * Batch stacking peak ≈ (2N frames + N lumas(1/3) + slack) at working resolution
-         * (developed frames + their aligned/warped copies + a luma plane per frame, plus a few
-         * frames of transient slack); on iOS the ~3GB per-app ceiling makes 2400px safe, but
-         * Android's Java heap (512MB with largeHeap on Pixel) cannot hold an 8-frame batch at the
-         * sensor's binned resolution. Derive the largest long edge that fits half the heap,
-         * clamped to [1200, managedWorkingResolution]. Android deviation: output long edge may be
-         * below iOS's 2400 on small-heap devices.
+         * The batch peak resident set (in frame-equivalents) is owned by the engine next to the
+         * code it describes — [Pipeline.batchPeakFrameEquivalents] for the align+reduce path,
+         * [FocusStacker.peakFrameEquivalents] for the Depth blend peak — and injected here, so an
+         * engine refactor updates this budget math with it. On iOS the ~3GB per-app ceiling makes
+         * 2400px safe, but Android's Java heap (512MB with largeHeap on Pixel) cannot hold an
+         * 8-frame batch at the sensor's binned resolution. Derive the largest long edge that fits
+         * half the heap, clamped to [1200, managedWorkingResolution]. Android deviation: output
+         * long edge may be below iOS's 2400 on small-heap devices.
          *
          * Pure function of (frameCount, frameEquivalents, maxMemory) so unit tests can pin the
          * heap. Frames are linear RGB float (12 bytes/px) and assumed 4:3.
          */
         fun heapAwareWorkingResolution(
             frameCount: Int,
-            frameEquivalents: Double = 2.0 * frameCount + frameCount / 3.0 + 3.0,
+            frameEquivalents: Double = Pipeline.batchPeakFrameEquivalents(frameCount),
             maxMemory: Long = Runtime.getRuntime().maxMemory()
         ): Int {
             val budgetBytes = maxMemory / 2.0                       // leave half the heap for everything else
@@ -669,14 +673,22 @@ class StackCaptureCoordinator(
         }
 
         /**
-         * Frame-equivalents for the Depth (focus-stack) path — FocusStacker is the most
-         * memory-hungry batch consumer. At its blend peak it holds, per N brackets (a luma/weight
-         * plane = 1/3 of a frame; a pyramid totals ≈ 4/3 of its base):
-         *   input frames N + warped aligned copies N + sharpness maps N/3 + selection weights N/3
-         *   + 3-channel mask images N + image Laplacian pyramids 4N/3 + mask Gaussian pyramids 4N/3
-         *   ≈ 19N/3, plus ~3 frames of slack for the reference luma, collapse, and transients.
+         * The working long edge the engine will ACTUALLY produce from [sourceLongEdge] under a
+         * [budgetEdge] target. The engine's downscale is repeated 2× Gaussian reduction with
+         * ceiling dimensions (Kotlin and Swift `Pipeline.downscaleOne` both halve via
+         * `ImagePyramid.reduce`; neither resizes to an exact target), so the achieved edge is
+         * ceil(source / 2^k) for the smallest k that fits the budget — NOT the budget number.
+         * E.g. a ~2016px binned RAW source budgeted at 1200 lands at 1008; a 1500px fallback
+         * frame lands at 750. Feeding the engine this value yields bit-identical pixels to
+         * feeding it [budgetEdge] (the halving loop stops at the same step); the point is that
+         * the heap accounting and the comments describe a resolution that actually exists.
          */
-        fun depthFrameEquivalents(frameCount: Int): Double = 19.0 * frameCount / 3.0 + 3.0
+        fun achievableWorkingResolution(budgetEdge: Int, sourceLongEdge: Int): Int {
+            if (sourceLongEdge <= 0) return budgetEdge      // unknown source — keep the budget value
+            var edge = sourceLongEdge                       // already fits → passes through unhalved
+            while (edge > budgetEdge) { edge = (edge + 1) / 2 }
+            return edge
+        }
     }
 
     /**
@@ -690,6 +702,22 @@ class StackCaptureCoordinator(
      * Mirrors iOS `dumpFramesForDiagnostics`.
      */
     private val dumpFramesForDiagnostics: Boolean = false
+
+    /**
+     * Long edge of a RAW burst's mosaic frames, peeked WITHOUT consuming the one-shot holder.
+     * Only an Int escapes — the frames stay unpinned (the helper's locals die at return).
+     * Returns 0 when the holder is empty or holds a different payload type.
+     */
+    private fun peekRawLongEdge(
+        ref: java.util.concurrent.atomic.AtomicReference<CapturedBurst.Payload?>
+    ): Int = (ref.get() as? CapturedBurst.Payload.Raw)?.frames?.firstOrNull()
+        ?.let { maxOf(it.width, it.height) } ?: 0
+
+    /** Long edge of a developed (non-RAW fallback) burst's frames; same peek contract as above. */
+    private fun peekDevelopedLongEdge(
+        ref: java.util.concurrent.atomic.AtomicReference<CapturedBurst.Payload?>
+    ): Int = (ref.get() as? CapturedBurst.Payload.Developed)?.images?.firstOrNull()
+        ?.let { maxOf(it.width, it.height) } ?: 0
 
     /**
      * CPU-heavy develop → downscale → align → stack → encode. Runs on [processingDispatcher].
@@ -745,13 +773,19 @@ class StackCaptureCoordinator(
                     referencePixels  = ref
                 } else if (!mode.supportsBlendReference) {
                     // Depth: develop all brackets at the managed depth resolution — lowered further
-                    // if this heap can't hold the focus stack's batch peak — then focus-stack.
+                    // if this heap can't hold the focus stack's blend peak (FocusStacker owns its
+                    // own residency coefficients) — then focus-stack. The achievable edge models
+                    // the engine's halving downscale from the binned source (peeked BEFORE the
+                    // one-shot take so the frames stay unpinned).
                     // No blend-strength reference — frames differ by focus, not by time. (spec 2026-06-11 §4)
                     val depthResolution = depthWorkingResolution?.let { preset ->
-                        minOf(preset, heapAwareWorkingResolution(
-                            frameCount       = frameCount,
-                            frameEquivalents = depthFrameEquivalents(frameCount)
-                        ))
+                        achievableWorkingResolution(
+                            budgetEdge = minOf(preset, heapAwareWorkingResolution(
+                                frameCount       = frameCount,
+                                frameEquivalents = FocusStacker.peakFrameEquivalents(frameCount)
+                            )),
+                            sourceLongEdge = peekRawLongEdge(payloadRef) / 2   // binned develop halves
+                        )
                     }
                     val developed = Pipeline.developedFrames(
                         frames           = takeRawFrames(),
@@ -770,11 +804,17 @@ class StackCaptureCoordinator(
                 } else {
                     // Detail/Night BATCH path (sigma-clip needs all samples at once): size the
                     // working resolution to this heap and the ACTUAL frame count so the resident
-                    // set (frames + aligned copies + lumas) fits. Streaming looks keep 2400.
+                    // set (Pipeline.batchPeakFrameEquivalents) fits. Streaming looks keep 2400.
+                    // The achievable edge models the engine's halving downscale from the binned
+                    // source (peeked BEFORE the one-shot take so the frames stay unpinned).
+                    val batchResolution = achievableWorkingResolution(
+                        budgetEdge     = heapAwareWorkingResolution(frameCount = frameCount),
+                        sourceLongEdge = peekRawLongEdge(payloadRef) / 2   // binned develop halves
+                    )
                     val developed = Pipeline.developedFrames(
                         frames           = takeRawFrames(),
                         binnedDevelop    = true,
-                        workingResolution = heapAwareWorkingResolution(frameCount = frameCount)
+                        workingResolution = batchResolution
                     )
                     if (shouldCancel()) throw StackCancellationException()
                     val (res, ref) = Pipeline.reduceImagesWithReference(developed, mode)
@@ -788,12 +828,16 @@ class StackCaptureCoordinator(
                 // and route every look through the images pipeline. (spec 2026-06-11 §3)
                 if (mode == StackMode.DEPTH_OF_FIELD) {
                     // Same heap-aware lowering as the RAW depth path (frames arrive at the 1500px
-                    // fallback decode size; FocusStacker downscales further only when needed).
+                    // fallback decode size; FocusStacker downscales — by HALVING — only when needed,
+                    // so the achievable edge from the actual source is what really gets stacked).
                     val depthResolution = depthWorkingResolution?.let { preset ->
-                        minOf(preset, heapAwareWorkingResolution(
-                            frameCount       = frameCount,
-                            frameEquivalents = depthFrameEquivalents(frameCount)
-                        ))
+                        achievableWorkingResolution(
+                            budgetEdge = minOf(preset, heapAwareWorkingResolution(
+                                frameCount       = frameCount,
+                                frameEquivalents = FocusStacker.peakFrameEquivalents(frameCount)
+                            )),
+                            sourceLongEdge = peekDevelopedLongEdge(payloadRef)
+                        )
                     }
                     result = FocusStacker.allInFocus(
                         images = takeDevelopedImages(),
@@ -814,12 +858,20 @@ class StackCaptureCoordinator(
                     referencePixels  = ref
                 } else {
                     if (shouldCancel()) throw StackCancellationException()
-                    // Heap-aware here too: fallback frames decode at 1500px, so this is effectively
-                    // min(heapAware, 1500) — a no-op pass-through unless the heap demands smaller.
+                    // Heap-aware here too: fallback frames decode at 1500px. The engine downscale
+                    // HALVES (it can't hit an arbitrary target), so when the heap budget is below
+                    // the source edge the stack runs at the next halving DOWN — e.g. a 1200 budget
+                    // on a 1500px frame runs at 750, below the MIN floor (best effort; the next
+                    // halving up wouldn't fit the heap). achievableWorkingResolution reports that
+                    // real edge. Computed BEFORE the one-shot take (the peek needs the payload).
+                    val batchResolution = achievableWorkingResolution(
+                        budgetEdge     = heapAwareWorkingResolution(frameCount = frameCount),
+                        sourceLongEdge = peekDevelopedLongEdge(payloadRef)
+                    )
                     val (res, ref) = Pipeline.reduceImagesWithReference(
                         imgs             = takeDevelopedImages(),
                         mode             = mode,
-                        workingResolution = heapAwareWorkingResolution(frameCount = frameCount)
+                        workingResolution = batchResolution
                     )
                     result          = res
                     referencePixels = if (mode.supportsBlendReference) ref else null

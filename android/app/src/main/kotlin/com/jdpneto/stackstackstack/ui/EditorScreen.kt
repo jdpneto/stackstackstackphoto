@@ -1,6 +1,5 @@
 package com.jdpneto.stackstackstack.ui
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -39,7 +38,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jdpneto.stackengine.CropAspect
-import com.jdpneto.stackengine.ImageAdjustments
+import com.jdpneto.stackengine.PixelImage
 import com.jdpneto.stackstackstack.LibraryStore
 import com.jdpneto.stackstackstack.ResultRenderer
 import kotlinx.coroutines.Dispatchers
@@ -78,25 +77,30 @@ fun EditorScreen(
     var isSaving by remember { mutableStateOf(false) }
     var renderJob: Job? by remember { mutableStateOf(null) }
 
+    // Linear-light sources decoded ONCE per editor session (keyed by record id): they're
+    // invariant across slider moves, so each preview render reuses them instead of re-decoding
+    // + re-linearizing the multi-MB original/reference on every slider release.
+    val linearCache = remember(editSource.id) { EditorLinearCache() }
+
     // Render a new preview when adj changes (debounced: launched on slider release).
+    // The preview bitmap is built directly from the rendered RGBA8 bytes — no JPEG
+    // encode→decode round-trip (that stays exclusively in the SAVE path below).
     fun schedulePreview() {
         renderJob?.cancel()
         val snapshot = adj.copy()
         val origData = editSource.originalData
         val refData  = editSource.referenceData
-        val fmt      = editSource.format
         renderJob = scope.launch {
-            val bytes = withContext(Dispatchers.Default) {
-                ResultRenderer.render(
-                    originalData  = origData,
-                    adjustments   = snapshot,
-                    quality       = 0.85,
-                    maxPixel      = 1200,
-                    format        = fmt,
-                    referenceData = refData
+            val bmp = withContext(Dispatchers.Default) {
+                val linear = linearCache.originalOrDecode(origData)
+                    ?: return@withContext null
+                ResultRenderer.renderPreviewBitmap(
+                    linear      = linear,
+                    adjustments = snapshot,
+                    reference   = linearCache.referenceOrDecode(refData)
                 )
             }
-            bytes?.let { previewBitmap = BitmapFactory.decodeByteArray(it, 0, it.size) }
+            bmp?.let { previewBitmap = it }
         }
     }
 
@@ -262,6 +266,41 @@ fun EditorScreen(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Per-editor-session cache of the decoded linear-light preview sources (original + reference),
+ * decoded lazily at the preview resolution (1200 px — the same ceiling the previous per-slider
+ * [ResultRenderer.render] call used, so blend-lerp dimensions still match). Decode runs at most
+ * once per source — including the failure case (a corrupt original shouldn't be re-decoded on
+ * every slider move). Thread-safe: overlapping render jobs may race on first access.
+ */
+private class EditorLinearCache {
+    private val lock = Any()
+    private var originalLoaded = false
+    private var original: PixelImage? = null
+    private var referenceLoaded = false
+    private var reference: PixelImage? = null
+
+    fun originalOrDecode(data: ByteArray): PixelImage? = synchronized(lock) {
+        if (!originalLoaded) {
+            original = ResultRenderer.decodeLinear(data, maxPixel = PREVIEW_MAX_PIXEL)
+            originalLoaded = true
+        }
+        original
+    }
+
+    fun referenceOrDecode(data: ByteArray?): PixelImage? = synchronized(lock) {
+        if (!referenceLoaded) {
+            reference = data?.let { ResultRenderer.decodeLinear(it, maxPixel = PREVIEW_MAX_PIXEL) }
+            referenceLoaded = true
+        }
+        reference
+    }
+
+    private companion object {
+        const val PREVIEW_MAX_PIXEL = 1200
+    }
+}
 
 /** Short label for the crop aspect picker. Mirrors iOS [CropAspect.shortLabel]. */
 val CropAspect.shortLabel: String

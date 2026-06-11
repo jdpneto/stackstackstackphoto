@@ -1,8 +1,10 @@
 package com.jdpneto.stackstackstack
 
+import com.jdpneto.stackengine.FocusStacker
+import com.jdpneto.stackengine.Pipeline
 import com.jdpneto.stackstackstack.StackCaptureCoordinator.Companion.MANAGED_WORKING_RESOLUTION
 import com.jdpneto.stackstackstack.StackCaptureCoordinator.Companion.MIN_WORKING_RESOLUTION
-import com.jdpneto.stackstackstack.StackCaptureCoordinator.Companion.depthFrameEquivalents
+import com.jdpneto.stackstackstack.StackCaptureCoordinator.Companion.achievableWorkingResolution
 import com.jdpneto.stackstackstack.StackCaptureCoordinator.Companion.heapAwareWorkingResolution
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -13,8 +15,9 @@ import org.junit.Test
  * (frameCount, frameEquivalents, maxMemory) — maxMemory is injected so these tests pin the heap.
  *
  * Formula: budget = maxMemory/2; bytesPerFrame = budget / frameEquivalents (default
- * 2N + N/3 + 3); pixels = bytesPerFrame / 12; edge = sqrt(pixels / 0.75) (4:3), rounded down to a
- * multiple of 8, clamped to [1200, 2400].
+ * [Pipeline.batchPeakFrameEquivalents] = 2N + N/3 + 3, pinned in the engine's
+ * ResidencyModelTests); pixels = bytesPerFrame / 12; edge = sqrt(pixels / 0.75) (4:3),
+ * rounded down to a multiple of 8, clamped to [1200, 2400].
  */
 class HeapAwareWorkingResolutionTest {
 
@@ -89,15 +92,53 @@ class HeapAwareWorkingResolutionTest {
     fun depthEquivalentsAreMoreConservativeThanDefault() {
         // FocusStacker holds frames + aligned copies + masks + two pyramid sets (≈ 19N/3 + 3),
         // so for the same heap Depth must come out at or below the default batch estimate.
+        // The coefficients themselves are engine-owned (pinned in ResidencyModelTests).
         val n = 10
-        assertTrue(depthFrameEquivalents(n) > 2.0 * n + n / 3.0 + 3.0)
-        val depth = heapAwareWorkingResolution(n, frameEquivalents = depthFrameEquivalents(n), maxMemory = 4 * gb)
+        assertTrue(FocusStacker.peakFrameEquivalents(n) > Pipeline.batchPeakFrameEquivalents(n))
+        val depth = heapAwareWorkingResolution(n, frameEquivalents = FocusStacker.peakFrameEquivalents(n), maxMemory = 4 * gb)
         val batch = heapAwareWorkingResolution(n, maxMemory = 4 * gb)
         assertTrue(depth <= batch)
         // On the Pixel's 512MB heap a 10-bracket depth stack pins to the quality floor.
         assertEquals(
             MIN_WORKING_RESOLUTION,
-            heapAwareWorkingResolution(n, frameEquivalents = depthFrameEquivalents(n), maxMemory = 512 * mb)
+            heapAwareWorkingResolution(n, frameEquivalents = FocusStacker.peakFrameEquivalents(n), maxMemory = 512 * mb)
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // achievableWorkingResolution — the engine downscale HALVES (it cannot hit
+    // an arbitrary target), so the achieved edge is ceil(source / 2^k), not the budget.
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun achievableEdgeHalvesBinnedRawSourceBelowTheFloor() {
+        // ~12 MP sensor (4032 long edge) → binned develop 2016 → one halving lands at 1008,
+        // honestly BELOW the 1200 budget/floor (the next step up, 2016, busts the heap budget).
+        assertEquals(1008, achievableWorkingResolution(budgetEdge = 1200, sourceLongEdge = 2016))
+    }
+
+    @Test
+    fun achievableEdgeHalvesFallbackDecodeBelowTheFloor() {
+        // 1500px fallback decode with a 1200 budget → 750, NOT min(1200, 1500).
+        assertEquals(750, achievableWorkingResolution(budgetEdge = 1200, sourceLongEdge = 1500))
+    }
+
+    @Test
+    fun achievableEdgePassesThroughWhenSourceAlreadyFits() {
+        assertEquals(1500, achievableWorkingResolution(budgetEdge = 2400, sourceLongEdge = 1500))
+        assertEquals(1200, achievableWorkingResolution(budgetEdge = 1200, sourceLongEdge = 1200))
+    }
+
+    @Test
+    fun achievableEdgeUsesCeilingHalvingLikeImagePyramidReduce() {
+        // ImagePyramid.reduce produces ceil(edge/2): 2017 → 1009 (not 1008).
+        assertEquals(1009, achievableWorkingResolution(budgetEdge = 1200, sourceLongEdge = 2017))
+        // Two halvings when one isn't enough: 5000 → 2500 → 1250 → 625 under a 1200 budget.
+        assertEquals(625, achievableWorkingResolution(budgetEdge = 1200, sourceLongEdge = 5000))
+    }
+
+    @Test
+    fun achievableEdgeFallsBackToBudgetWhenSourceUnknown() {
+        assertEquals(1200, achievableWorkingResolution(budgetEdge = 1200, sourceLongEdge = 0))
     }
 }

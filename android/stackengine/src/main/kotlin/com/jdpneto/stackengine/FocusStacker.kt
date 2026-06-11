@@ -14,6 +14,23 @@ package com.jdpneto.stackengine
 object FocusStacker {
 
     /**
+     * Peak resident set of [allInFocus], in working-resolution frame-equivalents, for N brackets.
+     * At the multiband-blend peak it holds (a luma/weight plane = 1/3 of an RGB frame; a full
+     * pyramid totals ≈ 4/3 of its base level):
+     *
+     *   input frames N + warped aligned copies N        = 2N
+     *   + sharpness maps N/3 + selection weights N/3    = 2N/3
+     *   + 3-channel mask images N                       = N
+     *   + image Laplacian pyramids 4N/3                 = 4N/3
+     *   + mask Gaussian pyramids 4N/3                   = 4N/3
+     *   ≈ 19N/3, plus ~3 frames of slack for the reference luma, collapse, and transients.
+     *
+     * Owned by the engine because it encodes THIS file's blend-peak internals — callers (the
+     * app's heap-aware working-resolution budget) must not hard-code these coefficients.
+     */
+    fun peakFrameEquivalents(frameCount: Int): Double = 19.0 * frameCount / 3.0 + 3.0
+
+    /**
      * All-in-focus composite from already-developed linear frames (all the same dimensions),
      * in SWEEP ORDER (chain alignment depends on adjacency in focus).
      */

@@ -105,7 +105,8 @@ internal fun cfaColor(pattern: CFAPattern, x: Int, y: Int): CFAColor {
  *
  * Degenerate metadata (whiteLevel ≤ blackLevel) returns 0 without dividing by zero.
  */
-internal fun linearizeSample(v: Int, black: Float, white: Float): Float {
+@Suppress("NOTHING_TO_INLINE")   // hot path: called per CFA site (~12M/frame) from the fused develop
+internal inline fun linearizeSample(v: Int, black: Float, white: Float): Float {
     val denom = white - black
     if (denom <= 0f) return 0f
     return maxOf((v.toFloat() - black) / denom, 0f)

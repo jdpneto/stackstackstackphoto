@@ -285,6 +285,22 @@ object Pipeline {
     ).first
 
     /**
+     * Peak resident set of the BATCH align+reduce path ([reduceImagesWithReference] and friends),
+     * in working-resolution frame-equivalents, for an N-frame stack:
+     *
+     *   held inputs N (the developed frames stay live through alignment)
+     *   + aligned/warped copies N ([alignedStackWithRefIdx] materializes the full aligned list)
+     *   + luma planes N/3 (one single-channel float plane per frame, 1/3 of an RGB frame)
+     *   + ~3 frames of slack (reference selection, downscaled estimate copies, reducer transients)
+     *
+     * Owned by the engine because it encodes THIS file's batch internals — callers (the app's
+     * heap-aware working-resolution budget) must not hard-code these coefficients, or an engine
+     * refactor silently invalidates their memory math.
+     */
+    fun batchPeakFrameEquivalents(frameCount: Int): Double =
+        2.0 * frameCount + frameCount / 3.0 + 3.0
+
+    /**
      * Width of the develop fan-out. Each worker transiently holds one FULL-SIZE developed frame
      * (~38 MB for a 12 MP sensor's binned develop) before it is downscaled to the working
      * resolution, so bounding the width bounds the transient memory spike on small-heap devices

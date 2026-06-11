@@ -1,6 +1,6 @@
 package com.jdpneto.stackstackstack.ui
 
-import android.graphics.BitmapFactory
+import android.util.LruCache
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.jdpneto.stackstackstack.ImageDecoder
 import com.jdpneto.stackstackstack.LibraryStore
 import com.jdpneto.stackstackstack.StackRecord
 import kotlinx.coroutines.Dispatchers
@@ -148,19 +149,30 @@ private fun ThumbnailCell(
 }
 
 /**
+ * In-memory cache for decoded gallery/detail bitmaps, sized to 1/8 of the max heap (the standard
+ * LruCache recipe), so scrolling back through the grid doesn't re-decode every cell from disk.
+ * Keys are `path@lastModified#maxPixel` — an edit rewrites the file (new lastModified), which
+ * naturally invalidates the stale entry.
+ */
+private val thumbnailCache: LruCache<String, android.graphics.Bitmap> by lazy {
+    val maxKB = (Runtime.getRuntime().maxMemory() / 1024L / 8L).toInt()
+    object : LruCache<String, android.graphics.Bitmap>(maxKB) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap): Int =
+            value.byteCount / 1024
+    }
+}
+
+/**
  * Decode a JPEG/HEIC file to a [android.graphics.Bitmap] downscaled to at most [maxPixel]
- * on the long edge. Never upscales. Uses [BitmapFactory.Options.inSampleSize] for efficiency.
+ * on the long edge. Never upscales. The downsample policy is owned by [ImageDecoder.decodeFile]
+ * (streaming decode — no whole-file byte copy); results are memoized in [thumbnailCache].
  * Mirrors iOS [Thumbnailer.load].
  */
 internal fun decodeThumbnail(file: File, maxPixel: Int): android.graphics.Bitmap? {
     if (!file.exists()) return null
-    return try {
-        val bytes = file.readBytes()
-        val opts = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-        val longEdge = maxOf(opts.outWidth, opts.outHeight)
-        val sample = if (longEdge > maxPixel) longEdge / maxPixel else 1
-        val decOpts = BitmapFactory.Options().also { it.inSampleSize = sample }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decOpts)
-    } catch (_: Exception) { null }
+    val key = "${file.path}@${file.lastModified()}#$maxPixel"
+    thumbnailCache.get(key)?.let { return it }
+    val bitmap = try { ImageDecoder.decodeFile(file.path, maxPixel) } catch (_: Exception) { null }
+    if (bitmap != null) thumbnailCache.put(key, bitmap)
+    return bitmap
 }

@@ -72,6 +72,36 @@ object ImageDecoder {
         return Triple(rgba, w, h)
     }
 
+    /**
+     * Decode an image FILE to a [Bitmap], downsampled so the long edge is at most [maxPixel].
+     *
+     * This is the single owner of the downsample policy for on-disk results (bounds-only first
+     * pass → power-of-2 [computeSampleSize] → sRGB-preferred decode → never upscales), streaming
+     * straight from the file via [BitmapFactory.decodeFile] — no whole-file `readBytes()` copy
+     * of a multi-MB JPEG/HEIC per call. Used by the gallery grid and the photo detail viewer.
+     *
+     * @return The decoded bitmap, or null when the file is missing/corrupt.
+     */
+    fun decodeFile(path: String, maxPixel: Int? = null): Bitmap? {
+        // Bounds-only pass (no pixel decode) to size the subsample.
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        val srcW = bounds.outWidth
+        val srcH = bounds.outHeight
+        if (srcW <= 0 || srcH <= 0) return null
+
+        val opts = BitmapFactory.Options().apply {
+            inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
+            if (maxPixel != null) {
+                val longEdge = maxOf(srcW, srcH)
+                // CEILING: only downscale, never upscale (same guard as [rgba8]).
+                val target = minOf(maxPixel, longEdge)
+                inSampleSize = computeSampleSize(longEdge, target)
+            }
+        }
+        return BitmapFactory.decodeFile(path, opts)
+    }
+
     /** Compute an inSampleSize (power of 2) such that the decoded long edge is ≤ [target]. */
     private fun computeSampleSize(longEdge: Int, target: Int): Int {
         var sample = 1

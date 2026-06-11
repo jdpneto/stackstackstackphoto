@@ -116,33 +116,39 @@ internal fun fusedBinDemosaic(f: RawSensorFrame): PixelImage {
     val w = f.width; val h = f.height
     val ow = w / 2; val oh = h / 2
     val out = PixelImage(ow, oh)
+    // Hot loop (~3M output pixels per 12 MP frame): hoist every loop invariant into locals and
+    // write channels straight into the flat pixel array — no Vec3 boxing ART would have to
+    // scalar-replace, no repeated field loads.
+    val mosaic = f.mosaic
+    val cfa = f.cfa
+    val black = f.blackLevel; val white = f.whiteLevel
+    val gainR = f.wbGains.x; val gainG = f.wbGains.y; val gainB = f.wbGains.z
+    val pixels = out.pixels
     for (oy in 0 until oh) {
         val y0 = 2 * oy
         for (ox in 0 until ow) {
             val x0 = 2 * ox
             var r = 0f; var g = 0f; var b = 0f; var gn = 0f
             for (dy in 0 until 2) {
+                val cy = y0 + dy
+                val rowBase = cy * w
                 for (dx in 0 until 2) {
-                    val rawIdx = (y0 + dy) * w + (x0 + dx)
-                    val raw = f.mosaic[rawIdx].toInt() and 0xFFFF
-                    // Inline linearizeSample (same logic as the standalone function).
-                    val denom = f.whiteLevel - f.blackLevel
-                    val lin = if (denom <= 0f) 0f else maxOf((raw.toFloat() - f.blackLevel) / denom, 0f)
-                    // Inline white-balance gain (same logic as linearizeAndBalance).
-                    val cx = x0 + dx; val cy = y0 + dy
-                    val v = lin * when (cfaColor(f.cfa, cx, cy)) {
-                        CFAColor.RED   -> f.wbGains.x
-                        CFAColor.GREEN -> f.wbGains.y
-                        CFAColor.BLUE  -> f.wbGains.z
-                    }
-                    when (cfaColor(f.cfa, cx, cy)) {
-                        CFAColor.RED   -> r = v
-                        CFAColor.GREEN -> { g += v; gn++ }
-                        CFAColor.BLUE  -> b = v
+                    val cx = x0 + dx
+                    val raw = mosaic[rowBase + cx].toInt() and 0xFFFF
+                    // The linearize contract lives in ONE place: linearizeSample (inline, zero-cost).
+                    val lin = linearizeSample(raw, black, white)
+                    // White-balance gain per CFA color (same math/order as linearizeAndBalance).
+                    when (cfaColor(cfa, cx, cy)) {
+                        CFAColor.RED   -> r = lin * gainR
+                        CFAColor.GREEN -> { g += lin * gainG; gn++ }
+                        CFAColor.BLUE  -> b = lin * gainB
                     }
                 }
             }
-            out[ox, oy] = Vec3(r, if (gn > 0f) g / gn else g, b)
+            val base = (oy * ow + ox) * 3
+            pixels[base]     = r
+            pixels[base + 1] = if (gn > 0f) g / gn else g
+            pixels[base + 2] = b
         }
     }
     return out
