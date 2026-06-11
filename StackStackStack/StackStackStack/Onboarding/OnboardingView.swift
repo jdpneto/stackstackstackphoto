@@ -37,6 +37,9 @@ struct OnboardingView: View {
     @Binding var isPresented: Bool
     // Fix 3: recomputed on appear so the state is fresh if the user granted/denied between pages.
     @State private var cameraDenied = false
+    // Landscape (compact height) gets a smaller scaffold so the camera page's buttons never
+    // collide with the page-dot indicator (device finding, 2026-06-11 test pass).
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     var body: some View {
         VStack {
@@ -116,23 +119,30 @@ struct OnboardingView: View {
     private func pageScaffold<Footer: View>(symbol: String, tint: Color, title: String,
                                             line1: String, line2: String,
                                             @ViewBuilder footer: () -> Footer) -> some View {
-        VStack(spacing: 20) {
+        // Compact height (landscape phones): shrink the art and tighten spacing so the full
+        // page — including the camera footer buttons — fits above the page-dot indicator.
+        let compact = verticalSizeClass == .compact
+        let art: CGFloat = compact ? 96 : 180
+        return VStack(spacing: compact ? 10 : 20) {
             Spacer()
             ZStack {   // stylized stand-in for a sample shot; a real image can replace it later
-                RoundedRectangle(cornerRadius: 24)
+                RoundedRectangle(cornerRadius: compact ? 16 : 24)
                     .fill(LinearGradient(colors: [tint.opacity(0.55), .black],
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 180, height: 180)
-                Image(systemName: symbol).font(.system(size: 64)).foregroundColor(.white)
+                    .frame(width: art, height: art)
+                Image(systemName: symbol).font(.system(size: compact ? 38 : 64)).foregroundColor(.white)
             }
-            Text(title).font(.title).bold().foregroundColor(.white)
+            Text(title).font(compact ? .title3 : .title).bold().foregroundColor(.white)
             Text(line1).multilineTextAlignment(.center).foregroundColor(.white.opacity(0.9))
             Text(line2).font(.callout).multilineTextAlignment(.center).foregroundColor(.white.opacity(0.6))
             footer()
-                .padding(.top, 12)
+                .padding(.top, compact ? 6 : 12)
             Spacer()
         }
         .padding(.horizontal, 32)
+        // Keep the page content clear of the TabView's page-dot indicator, which draws over the
+        // bottom of each page (it overlapped line2 in portrait and the buttons in landscape).
+        .padding(.bottom, 36)
     }
 
     private func finish() {
