@@ -120,12 +120,30 @@ object BurstSpool {
     }
 
     /**
-     * Delete every spool dir under [root] except [keep]. Used by the service at app start
-     * (leftovers from a killed process) and at each burst start (the previous burst's spool).
+     * Delete every spool dir under [root] except [keep]. Used by the service at each burst arm
+     * to reclaim ITS OWN previous generations — [root] must be the calling instance's private
+     * spool namespace, never the shared root (another instance's spool may still be lazily read
+     * by an orphaned processing job; see [Camera2CaptureService]'s `instanceSpoolRoot` kdoc).
      */
     fun clearSpools(root: File, keep: File? = null) {
         root.listFiles()?.forEach { entry ->
             if (keep == null || entry.name != keep.name) entry.deleteRecursively()
+        }
+    }
+
+    /**
+     * AGE-GATED sweep of the SHARED spool root: delete only entries not modified within
+     * [maxAgeMs] — crash leftovers by definition (a live burst writes for seconds and its
+     * processing job reads for minutes). Young entries are presumed to belong to a live service
+     * instance (possibly a PREVIOUS one whose processing job survived activity recreation and is
+     * still reading its spool) and are left alone; a later app start reclaims them. A dir's
+     * lastModified updates when its direct children change — i.e. at burst arm — so a live
+     * instance's namespace is always young while it can still matter. [nowMs] is injectable for
+     * tests.
+     */
+    fun sweepStaleSpools(root: File, maxAgeMs: Long, nowMs: Long = System.currentTimeMillis()) {
+        root.listFiles()?.forEach { entry ->
+            if (nowMs - entry.lastModified() > maxAgeMs) entry.deleteRecursively()
         }
     }
 

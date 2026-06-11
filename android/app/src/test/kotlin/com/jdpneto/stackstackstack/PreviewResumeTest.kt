@@ -7,6 +7,9 @@ import android.graphics.SurfaceTexture
 import android.view.Surface
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -206,6 +209,78 @@ class ServicePreviewRestartTest {
         svc.awaitSessionQuiescentForTest()
         assertEquals("preview never requested → no camera open", 0, svc.configureCalls.get())
         assertEquals(0, svc.previewRequestCalls.get())
+    }
+
+    /** Poll (real time — the service runs on real threads) until [condition] holds. */
+    private fun awaitForTest(timeoutMs: Long = 5_000, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!condition() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertTrue("condition not met within ${timeoutMs}ms", condition())
+    }
+
+    /** A burst that stays in flight for the whole test: no HAL session exists, so each frame is
+     *  dropped on the ~3 s pacing schedule — a wide window until the caller cancels it. */
+    private fun longIdleRecipe() = CaptureRecipe(frameCount = 20, durationSeconds = 60.0)
+
+    @Test
+    fun `surface replacement mid-burst defers the restart — finish runs the full reconfigure`() = runTest {
+        val svc = makeService()
+        svc.setPreviewSurface(newSurface())
+        svc.startPreview()
+        assertEquals(1, svc.configureCalls.get())
+        assertEquals(1, svc.previewRequestCalls.get())
+
+        val burst = launch(Dispatchers.Default) {
+            runCatching { svc.captureBurst(longIdleRecipe(), { true }, null) }
+        }
+        awaitForTest { svc.isBurstActiveForTest() }
+
+        // The window surface is destroyed+recreated mid-burst. The service must invalidate the
+        // dead session but DEFER the reconfigure+restart: rebuilding now would run a plain
+        // auto-AE repeating preview under the burst's remaining frames (exposure shift in one
+        // stack). No configure, no preview request — and the burst stays armed.
+        svc.setPreviewSurface(newSurface())
+        svc.awaitSessionQuiescentForTest()
+        assertEquals("mid-burst surface replacement must not reconfigure", 1, svc.configureCalls.get())
+        assertEquals("mid-burst surface replacement must not restart the preview", 1, svc.previewRequestCalls.get())
+        assertTrue("the deferral must not kill the burst", svc.isBurstActiveForTest())
+
+        // Burst ends → finishLocked's restore detects the dead session and honors the pending
+        // surface replacement with a FULL reconfigure (whose tail starts the preview).
+        burst.cancelAndJoin()
+        awaitForTest { svc.configureCalls.get() == 2 }
+        svc.awaitSessionQuiescentForTest()
+        assertEquals(2, svc.previewRequestCalls.get())
+        assertFalse(svc.isBurstActiveForTest())
+    }
+
+    @Test
+    fun `startPreview mid-burst records the intent only — no reconfigure, no AE-hold stomp`() = runTest {
+        val svc = makeService()
+        svc.setPreviewSurface(newSurface())
+        svc.startPreview()
+        assertEquals(1, svc.configureCalls.get())
+
+        val burst = launch(Dispatchers.Default) {
+            runCatching { svc.captureBurst(longIdleRecipe(), { true }, null) }
+        }
+        awaitForTest { svc.isBurstActiveForTest() }
+
+        // Surface replaced mid-burst (session invalidated, restart deferred), then the racy
+        // resume-tick startPreview lands while the burst is still live: it must NOT run the
+        // fresh configure either — that would also rebuild under a plain auto-AE preview.
+        svc.setPreviewSurface(newSurface())
+        svc.awaitSessionQuiescentForTest()
+        assertTrue(svc.startPreview() != null)   // intent recorded; surface echoed back
+        svc.awaitSessionQuiescentForTest()
+        assertEquals(1, svc.configureCalls.get())
+        assertEquals(1, svc.previewRequestCalls.get())
+
+        // The single restore happens at burst end.
+        burst.cancelAndJoin()
+        awaitForTest { svc.configureCalls.get() == 2 }
+        svc.awaitSessionQuiescentForTest()
+        assertEquals(2, svc.previewRequestCalls.get())
     }
 
     @Test

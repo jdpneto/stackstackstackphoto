@@ -107,6 +107,13 @@ open class Camera2CaptureService(
     private companion object {
         const val TAG = "SSSCamera2"
         const val NO_TOKEN = -1L
+        /**
+         * Age gate for the app-start spool sweep: a spool dir untouched for this long is a crash
+         * leftover by definition (a live burst writes for seconds and its processing job reads
+         * for minutes). Anything younger may belong to ANOTHER service instance whose orphaned
+         * processing job is still reading it — see [instanceSpoolRoot].
+         */
+        const val SPOOL_SWEEP_MAX_AGE_MS = 60L * 60 * 1000   // 1 hour
     }
 
     // -----------------------------------------------------------------------
@@ -246,8 +253,25 @@ open class Camera2CaptureService(
     // RAW frame spool (the 30-frame OOM fix — see BurstSpool)
     // -----------------------------------------------------------------------
 
-    /** Root of all burst spool dirs. cacheDir: the OS may reclaim it when the app isn't using it. */
+    /** Root of all burst spool dirs (SHARED across service instances — see [instanceSpoolRoot]).
+     *  cacheDir: the OS may reclaim it when the app isn't using it. */
     private val spoolRoot = File(context.cacheDir, "burst-spool")
+
+    /**
+     * THIS instance's spool namespace — unique per service instance. Spool-cleanup OWNERSHIP
+     * story: activity recreation (uiMode/locale/font-scale are NOT in the manifest's
+     * configChanges) builds a NEW service while the OLD coordinator's background processing job
+     * survives onDestroy (its scope is never cancelled) and may still be LAZILY reading the old
+     * instance's spool files ([BurstSpool.LazyFrameList] re-reads on every get). So no instance
+     * may ever delete another LIVE instance's spool dir. Two cleanups, each safe by construction:
+     *  - PER-BURST-ARM (captureBurst): clears only inside THIS namespace, where the coordinator's
+     *    shutter gate (isBusy = capturing OR processing) guarantees this instance's previous
+     *    burst payload is no longer being consumed when a new burst arms;
+     *  - APP-START (init below): an AGE-GATED sweep of the shared root — only dirs older than
+     *    [SPOOL_SWEEP_MAX_AGE_MS] (crash leftovers by definition) are deleted; a young foreign
+     *    dir is presumed live and left alone (it is reclaimed by a later app start).
+     */
+    private val instanceSpoolRoot = File(spoolRoot, "svc-${java.util.UUID.randomUUID()}")
 
     /** This burst's spool dir (written on stateExecutor at arm time; read on conversionExecutor). */
     @Volatile private var spoolDir: File? = null
@@ -256,14 +280,12 @@ open class Camera2CaptureService(
     private val spoolCounter = AtomicInteger(0)
 
     init {
-        // Spool-cleanup OWNER: this service, at app start AND at each burst start — the simplest
-        // owner that is correct, because the coordinator's shutter gate (isBusy = capturing OR
-        // processing) guarantees no previous burst's payload is still being consumed when a new
-        // burst arms, so deleting earlier spools can never race a reader. A finished burst's
-        // spool lingers until the next shot/app start, but it lives in cacheDir, which the OS is
-        // free to reclaim. Cleanup runs on conversionExecutor so it serializes with spool writes.
+        // App-start sweep of CRASH LEFTOVERS only — age-gated, never the whole root: a young
+        // foreign spool dir may belong to a previous service instance whose orphaned processing
+        // job is still reading it (see instanceSpoolRoot kdoc for the full ownership story).
+        // Runs on conversionExecutor so it serializes with spool writes.
         try {
-            conversionExecutor.execute { BurstSpool.clearSpools(spoolRoot) }
+            conversionExecutor.execute { BurstSpool.sweepStaleSpools(spoolRoot, SPOOL_SWEEP_MAX_AGE_MS) }
         } catch (_: RejectedExecutionException) {}
     }
 
@@ -300,11 +322,17 @@ open class Camera2CaptureService(
                 if (configured) invalidateSessionLocked(null)
                 previewSurface = surface
                 if (previewRequested) {
+                    // A LIVE burst must NOT be stomped: reconfiguring here would rebuild the
+                    // session with a plain auto-AE repeating preview, and the burst's REMAINING
+                    // stills (which submit to whatever session exists at submit time) would
+                    // capture without the burst-long AE/AWB hold — an exposure shift mixed into
+                    // one stack. Defer: the sticky previewRequested intent and the new surface
+                    // are both stored; finishLocked's resumePreviewAfterBurstLocked detects the
+                    // dead session and runs the full reconfigure when the burst ends.
+                    if (stateLock.withLock { continuation != null }) return@execute
                     try {
                         // Fresh configure includes the new surface and starts the repeating
-                        // preview itself (ensureConfiguredLocked tail). No live burst can be
-                        // stomped here: a genuinely new surface means the old session (and any
-                        // hold request on it) is already dead.
+                        // preview itself (ensureConfiguredLocked tail).
                         ensureConfiguredLocked()
                     } catch (e: Exception) {
                         Log.w(TAG, "preview restart on surface replacement failed", e)
@@ -343,6 +371,9 @@ open class Camera2CaptureService(
         latch.await(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
+    /** TEST-ONLY probe: whether a burst is currently armed (its continuation is set). */
+    internal fun isBurstActiveForTest(): Boolean = stateLock.withLock { continuation != null }
+
     // -----------------------------------------------------------------------
     // CaptureService: startPreview
     // -----------------------------------------------------------------------
@@ -371,14 +402,21 @@ open class Camera2CaptureService(
                         cont.resume(null)   // sticky flag set — the next surface auto-resumes
                         return@execute
                     }
+                    // A LIVE burst owns the repeating slot (its AE/AWB hold) — and, when the
+                    // session was invalidated mid-burst (surface replacement), a fresh configure
+                    // here would rebuild it under a plain auto-AE preview, shifting exposure
+                    // inside the stack. Either way: record the sticky intent only; finishLocked's
+                    // resumePreviewAfterBurstLocked restores (or fully reconfigures) at burst end.
+                    if (stateLock.withLock { continuation != null }) {
+                        cont.resume(previewSurface)
+                        return@execute
+                    }
                     try {
                         val wasConfigured = configured
                         ensureConfiguredLocked()
                         // ensureConfiguredLocked starts the repeating preview itself on a fresh
-                        // configure; on the already-configured path restore it here (never mid-burst).
-                        if (wasConfigured && !stateLock.withLock { continuation != null }) {
-                            startPreviewRequestLocked()
-                        }
+                        // configure; on the already-configured path restore it here.
+                        if (wasConfigured) startPreviewRequestLocked()
                         cont.resume(previewSurface)
                     } catch (e: Exception) {
                         Log.w(TAG, "startPreview configure failed", e)
@@ -540,13 +578,15 @@ open class Camera2CaptureService(
 
                     val gen = generation
 
-                    // Arm this burst's RAW spool and clear earlier bursts' spools (safe: the
-                    // shutter gate means nothing can still be reading them — see init kdoc).
-                    val newSpool = File(spoolRoot, "gen-$gen")
+                    // Arm this burst's RAW spool and clear THIS INSTANCE's earlier generations
+                    // (safe: the coordinator's shutter gate means nothing can still be reading
+                    // them). Scoped to instanceSpoolRoot — another instance's spool may still be
+                    // read by its orphaned processing job (see instanceSpoolRoot kdoc).
+                    val newSpool = File(instanceSpoolRoot, "gen-$gen")
                     spoolDir = newSpool
                     spoolCounter.set(0)
                     try {
-                        conversionExecutor.execute { BurstSpool.clearSpools(spoolRoot, keep = newSpool) }
+                        conversionExecutor.execute { BurstSpool.clearSpools(instanceSpoolRoot, keep = newSpool) }
                     } catch (_: RejectedExecutionException) {}
 
                     // Cancellation must not strand the state machine: a cancelled caller leaves
@@ -1075,9 +1115,10 @@ open class Camera2CaptureService(
         burstInfo = null
 
         // Drop stranded join halves and release the burst's AE/AWB hold (plain preview resumes
-        // the auto loop — iOS re-locks at the next shoot the same way).
+        // the auto loop — iOS re-locks at the next shoot the same way). If the surface was
+        // replaced mid-burst, the deferred reconfigure runs now (resumePreviewAfterBurstLocked).
         imageHandler.post { clearJoinState() }
-        sessionExecutor.execute { startPreviewRequestLocked() }
+        sessionExecutor.execute { resumePreviewAfterBurstLocked() }
 
         if (fallbackJPEG) {
             val imgs = pendingDeveloped.toList()
@@ -1517,6 +1558,26 @@ open class Camera2CaptureService(
         jpegImageReader = null
         configured      = false
         imageHandler.post { clearJoinState() }
+    }
+
+    /**
+     * Post-burst preview restore — the [finishLocked] tail. Two shapes, on [sessionExecutor]:
+     *  - session still alive (the normal case) → swap the burst's AE/AWB hold for the plain
+     *    repeating preview, resuming the auto loop;
+     *  - the preview surface was REPLACED mid-burst ([setPreviewSurface] invalidated the session
+     *    and DEFERRED its restart to here so the burst's remaining frames kept one consistent
+     *    exposure) → the old session is dead, so honor the pending replacement with a full
+     *    reconfigure (whose tail starts the repeating preview itself). Also covers a session
+     *    lost mid-burst to device eviction: the sticky intent reopens at burst end, best-effort.
+     */
+    private fun resumePreviewAfterBurstLocked() {
+        if (configured) { startPreviewRequestLocked(); return }
+        if (!previewRequested || previewSurface == null) return
+        try {
+            ensureConfiguredLocked()
+        } catch (e: Exception) {
+            Log.w(TAG, "preview restore after burst failed", e)   // preview is best-effort
+        }
     }
 
     /**

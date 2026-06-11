@@ -146,22 +146,50 @@ class BurstSpoolTest {
     }
 
     @Test
-    fun `Camera2CaptureService construction clears leftover spools from a killed process`() {
+    fun `sweepStaleSpools removes only entries older than the age gate`() {
+        val root = File(tempDir, "burst-spool")
+        val old   = File(root, "svc-old").apply { mkdirs() }
+        File(old, "gen-1/frame-000.bin").apply { parentFile!!.mkdirs() }.writeBytes(byteArrayOf(1))
+        val young = File(root, "svc-young").apply { mkdirs() }
+        File(young, "gen-1/frame-000.bin").apply { parentFile!!.mkdirs() }.writeBytes(byteArrayOf(2))
+
+        val now = System.currentTimeMillis()
+        val hourMs = 60L * 60 * 1000
+        assertTrue(old.setLastModified(now - hourMs - 60_000))     // just past the gate
+        assertTrue(young.setLastModified(now - hourMs + 60_000))   // just inside the gate
+
+        BurstSpool.sweepStaleSpools(root, maxAgeMs = hourMs, nowMs = now)
+        assertFalse("stale dir should be swept", old.exists())
+        assertTrue("young dir (possibly another live instance's) must survive",
+            File(young, "gen-1/frame-000.bin").isFile)
+    }
+
+    @Test
+    fun `Camera2CaptureService construction sweeps only OLD leftovers — young foreign spools survive`() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val root = File(context.cacheDir, "burst-spool")
-        val leftover = File(root, "gen-7").apply { mkdirs() }
-        File(leftover, "frame-000.bin").writeBytes(byteArrayOf(1, 2, 3))
+        // Crash leftover: an old instance namespace, untouched for hours.
+        val stale = File(root, "svc-stale")
+        File(stale, "gen-7/frame-000.bin").apply { parentFile!!.mkdirs() }.writeBytes(byteArrayOf(1, 2, 3))
+        assertTrue(stale.setLastModified(System.currentTimeMillis() - 2 * 60 * 60 * 1000L))
+        // A YOUNG foreign namespace: a previous service instance whose orphaned processing job
+        // (surviving activity recreation) may still be lazily reading it — must NOT be touched.
+        val young = File(root, "svc-young")
+        val youngFrame = File(young, "gen-1/frame-000.bin").apply { parentFile!!.mkdirs() }
+        youngFrame.writeBytes(byteArrayOf(4, 5, 6))
 
         val service = Camera2CaptureService(context)
         try {
-            // The cleanup runs on the service's conversion executor — poll briefly.
+            // The sweep runs on the service's conversion executor — poll briefly.
             val deadline = System.currentTimeMillis() + 5_000
-            while (leftover.exists() && System.currentTimeMillis() < deadline) {
+            while (stale.exists() && System.currentTimeMillis() < deadline) {
                 Thread.sleep(20)
             }
-            assertFalse("app-start cleanup should remove leftover spools", leftover.exists())
+            assertFalse("app-start sweep should remove stale leftovers", stale.exists())
+            assertTrue("young foreign spool must survive the app-start sweep", youngFrame.isFile)
         } finally {
             service.close()
+            young.deleteRecursively()   // don't leak into other tests sharing this cacheDir
         }
     }
 
