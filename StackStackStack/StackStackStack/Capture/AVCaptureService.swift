@@ -282,10 +282,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     let rawOK = self.output.availableRawPhotoPixelFormatTypes
                         .contains(where: { RawFrameConverter.isSupportedBayerFormat($0) })
                     self.stateQueue.async { self.rawSupported = rawOK }
-                    // Bayer RAW must be vended by the configured output, else capture can't produce frames.
-                    guard !self.output.availableRawPhotoPixelFormatTypes.isEmpty else {
-                        throw CaptureError.noRawFormat
-                    }
+                    // No RAW capability is NOT a configure failure — the burst falls back to HEIC ("Standard quality") and the rawSupported probe reports it.
                     cont.resume()
                 } catch {
                     cont.resume(throwing: error)

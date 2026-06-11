@@ -118,9 +118,9 @@ final class StackCaptureCoordinator: ObservableObject {
         // These guards run AFTER the isBusy check and BEFORE the per-shot clears so that a blocked
         // shot sets lastError and returns without touching the rest of the published state.
         let thermal = environment.thermalState()
-        if thermal == .critical { lastError = "Too hot — let the phone cool down."; return }
+        if thermal == .critical { environmentNote = nil; lastError = "Too hot — let the phone cool down."; return }
         if environment.freeDiskBytes() < CaptureEnvironment.minimumFreeBytes {
-            lastError = "Not enough storage to capture."; return
+            environmentNote = nil; lastError = "Not enough storage to capture."; return
         }
         let battery = environment.batteryLevel()
         if battery >= 0 && battery < CaptureEnvironment.lowBatteryThreshold && !environment.batteryCharging() {
