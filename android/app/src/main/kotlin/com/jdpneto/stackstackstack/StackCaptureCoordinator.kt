@@ -646,8 +646,59 @@ class StackCaptureCoordinator(
     /**
      * Managed working resolution (long-edge px) the stack is processed at. Downscaling the
      * developed frames before align/stack is the dominant speed + memory win. (design §4)
+     * Used as-is by the STREAMING looks (peak ≈ 2–3 frames regardless of burst length); the
+     * BATCH looks derive a heap-aware value from it via [heapAwareWorkingResolution].
      */
-    private val managedWorkingResolution: Int = 2400
+    private val managedWorkingResolution: Int = MANAGED_WORKING_RESOLUTION
+
+    companion object {
+        /** iOS `managedWorkingResolution` (long-edge px) — the ceiling on any working resolution. */
+        const val MANAGED_WORKING_RESOLUTION = 2400
+
+        /**
+         * Quality floor (long-edge px) for the heap-derived working resolution — below this the
+         * output stops looking like a photo upgrade. A stack that doesn't fit even at the floor
+         * proceeds at the floor (best effort) rather than refusing the shot.
+         */
+        const val MIN_WORKING_RESOLUTION = 1200
+
+        /**
+         * Largest working long edge whose BATCH stack fits in half the Java heap.
+         *
+         * Batch stacking peak ≈ (2N frames + N lumas(1/3) + slack) at working resolution
+         * (developed frames + their aligned/warped copies + a luma plane per frame, plus a few
+         * frames of transient slack); on iOS the ~3GB per-app ceiling makes 2400px safe, but
+         * Android's Java heap (512MB with largeHeap on Pixel) cannot hold an 8-frame batch at the
+         * sensor's binned resolution. Derive the largest long edge that fits half the heap,
+         * clamped to [1200, managedWorkingResolution]. Android deviation: output long edge may be
+         * below iOS's 2400 on small-heap devices.
+         *
+         * Pure function of (frameCount, frameEquivalents, maxMemory) so unit tests can pin the
+         * heap. Frames are linear RGB float (12 bytes/px) and assumed 4:3.
+         */
+        fun heapAwareWorkingResolution(
+            frameCount: Int,
+            frameEquivalents: Double = 2.0 * frameCount + frameCount / 3.0 + 3.0,
+            maxMemory: Long = Runtime.getRuntime().maxMemory()
+        ): Int {
+            val budgetBytes = maxMemory / 2.0                       // leave half the heap for everything else
+            val bytesPerFrame = budgetBytes / frameEquivalents
+            val pixels = bytesPerFrame / 12.0                       // 3 floats (RGB) per pixel
+            val edge = kotlin.math.sqrt(pixels / 0.75)              // 4:3: pixels = edge · (0.75·edge)
+            val rounded = (edge.toInt() / 8) * 8                    // round down to a multiple of 8
+            return rounded.coerceIn(MIN_WORKING_RESOLUTION, MANAGED_WORKING_RESOLUTION)
+        }
+
+        /**
+         * Frame-equivalents for the Depth (focus-stack) path — FocusStacker is the most
+         * memory-hungry batch consumer. At its blend peak it holds, per N brackets (a luma/weight
+         * plane = 1/3 of a frame; a pyramid totals ≈ 4/3 of its base):
+         *   input frames N + warped aligned copies N + sharpness maps N/3 + selection weights N/3
+         *   + 3-channel mask images N + image Laplacian pyramids 4N/3 + mask Gaussian pyramids 4N/3
+         *   ≈ 19N/3, plus ~3 frames of slack for the reference luma, collapse, and transients.
+         */
+        fun depthFrameEquivalents(frameCount: Int): Double = 19.0 * frameCount / 3.0 + 3.0
+    }
 
     /**
      * Depth working resolution — the engine's managed preset is the single source of truth.
@@ -699,27 +750,37 @@ class StackCaptureCoordinator(
                     result           = res
                     referencePixels  = ref
                 } else if (!mode.supportsBlendReference) {
-                    // Depth: develop all brackets at the managed depth resolution, then focus-stack.
+                    // Depth: develop all brackets at the managed depth resolution — lowered further
+                    // if this heap can't hold the focus stack's batch peak — then focus-stack.
                     // No blend-strength reference — frames differ by focus, not by time. (spec 2026-06-11 §4)
+                    val depthResolution = depthWorkingResolution?.let { preset ->
+                        minOf(preset, heapAwareWorkingResolution(
+                            frameCount       = frames.size,
+                            frameEquivalents = depthFrameEquivalents(frames.size)
+                        ))
+                    }
                     val developed = Pipeline.developedFrames(
                         frames           = frames,
                         binnedDevelop    = true,
-                        workingResolution = depthWorkingResolution
+                        workingResolution = depthResolution
                     )
                     if (shouldCancel()) throw StackCancellationException()
                     result = FocusStacker.allInFocus(
                         images = developed,
                         config = DepthConfig(
-                            workingResolution = depthWorkingResolution,
+                            workingResolution = depthResolution,
                             maxFrames         = maxOf(frames.size, 1)
                         )
                     ) ?: throw ProcessingError.FocusStackFailed
                     referencePixels = null
                 } else {
+                    // Detail/Night BATCH path (sigma-clip needs all samples at once): size the
+                    // working resolution to this heap and the ACTUAL frame count so the resident
+                    // set (frames + aligned copies + lumas) fits. Streaming looks keep 2400.
                     val developed = Pipeline.developedFrames(
                         frames           = frames,
                         binnedDevelop    = true,
-                        workingResolution = managedWorkingResolution
+                        workingResolution = heapAwareWorkingResolution(frameCount = frames.size)
                     )
                     if (shouldCancel()) throw StackCancellationException()
                     val (res, ref) = Pipeline.reduceImagesWithReference(developed, mode)
@@ -733,10 +794,18 @@ class StackCaptureCoordinator(
                 // Non-RAW fallback: frames are already at working resolution — skip the develop step
                 // and route every look through the images pipeline. (spec 2026-06-11 §3)
                 if (mode == StackMode.DEPTH_OF_FIELD) {
+                    // Same heap-aware lowering as the RAW depth path (frames arrive at the 1500px
+                    // fallback decode size; FocusStacker downscales further only when needed).
+                    val depthResolution = depthWorkingResolution?.let { preset ->
+                        minOf(preset, heapAwareWorkingResolution(
+                            frameCount       = images.size,
+                            frameEquivalents = depthFrameEquivalents(images.size)
+                        ))
+                    }
                     result = FocusStacker.allInFocus(
                         images = images,
                         config = DepthConfig(
-                            workingResolution = depthWorkingResolution,
+                            workingResolution = depthResolution,
                             maxFrames         = maxOf(images.size, 1)
                         )
                     ) ?: throw ProcessingError.FocusStackFailed
@@ -752,10 +821,12 @@ class StackCaptureCoordinator(
                     referencePixels  = ref
                 } else {
                     if (shouldCancel()) throw StackCancellationException()
+                    // Heap-aware here too: fallback frames decode at 1500px, so this is effectively
+                    // min(heapAware, 1500) — a no-op pass-through unless the heap demands smaller.
                     val (res, ref) = Pipeline.reduceImagesWithReference(
                         imgs             = images,
                         mode             = mode,
-                        workingResolution = managedWorkingResolution
+                        workingResolution = heapAwareWorkingResolution(frameCount = images.size)
                     )
                     result          = res
                     referencePixels = if (mode.supportsBlendReference) ref else null
