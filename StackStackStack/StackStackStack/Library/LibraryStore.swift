@@ -49,8 +49,9 @@ final class LibraryStore: @unchecked Sendable {
         try result.write(to: originalURL(for: id, format: format), options: Self.writeOptions)   // immutable original
         // The aligned reference frame — the blend-strength lerp's second endpoint; absent for depth
         // and legacy records (the slider is hidden when nil).
+        // A failed reference write must not lose the shot — the record simply has no blend (spec §6).
         if let reference {
-            try reference.write(to: referenceURL(for: id, format: format), options: Self.writeOptions)
+            try? reference.write(to: referenceURL(for: id, format: format), options: Self.writeOptions)
         }
         var records = (try? loadRaw()) ?? []
         records.insert(StackRecord(id: id, createdAt: now, mode: mode, frameCount: frameCount,
