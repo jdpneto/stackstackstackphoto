@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FileProvider path configuration for sharing result images via ACTION_SEND.
+    Covers the app's internal files directory (where LibraryStore writes its results).
+    The "Stacks/" sub-path matches LibraryStore.root = filesDir/Stacks.
+    Mirrors the iOS approach where UIActivityViewController receives the result file URL directly.
+-->
+<paths>
+    <files-path name="stacks" path="Stacks/" />
+</paths>

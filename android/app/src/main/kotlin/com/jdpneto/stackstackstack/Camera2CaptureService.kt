@@ -153,6 +153,29 @@ class Camera2CaptureService(
     @Volatile var displayRotation: Int = Surface.ROTATION_0
 
     // -----------------------------------------------------------------------
+    // Preview surface provider (B3 UI hook)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Provide the [Surface] the Camera2 session should send the repeating preview into. Must be
+     * called BEFORE [startPreview] so [ensureConfiguredLocked] can include it in the session
+     * output list.
+     *
+     * Mirrors the iOS pattern where [AVCaptureService.startPreview] returns a [CALayer] that the
+     * view hosts directly. Here the UI creates a [android.view.SurfaceView] (or [android.graphics.SurfaceTexture]),
+     * extracts its [Surface], and registers it here; [startPreview] then returns it back to the
+     * coordinator so the coordinator can hand it to the Compose [AndroidView].
+     *
+     * No-op if called after the session is already configured (the caller must recreate the
+     * service if the surface changes, which matches the iOS app-lifecycle model).
+     */
+    fun setPreviewSurface(surface: Surface) {
+        if (!configured) {
+            previewSurface = surface
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // CaptureService: startPreview
     // -----------------------------------------------------------------------
 
@@ -730,8 +753,9 @@ class Camera2CaptureService(
             throw RuntimeException("No suitable image output format available.")
         }
 
-        // Build the capture session with all surfaces.
+        // Build the capture session with all surfaces (preview first, then capture readers).
         val surfaces = buildList {
+            previewSurface?.let { add(it) }
             rawImageReader?.surface?.let { add(it) }
             jpegImageReader?.surface?.let { add(it) }
         }

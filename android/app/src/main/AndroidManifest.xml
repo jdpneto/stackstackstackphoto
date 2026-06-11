@@ -27,6 +27,21 @@
             </intent-filter>
         </activity>
 
+        <!--
+            FileProvider: shares result files with ACTION_SEND (the share sheet).
+            The authority must match the string used in PhotoDetailScreen's FileProvider.getUriForFile call.
+            Mirrors the iOS UIActivityViewController that shares the result file URL.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 
 </manifest>

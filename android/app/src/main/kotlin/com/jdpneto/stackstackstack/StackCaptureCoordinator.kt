@@ -286,6 +286,23 @@ class StackCaptureCoordinator(
     val library: LibraryStore get() = store
 
     // -----------------------------------------------------------------------
+    // B3 UI seams — expose services the Compose layer needs for preview wiring
+    // -----------------------------------------------------------------------
+
+    /**
+     * The underlying [CaptureService]; the Compose camera-preview view casts it to
+     * [Camera2CaptureService] to call [Camera2CaptureService.setPreviewSurface] before
+     * [startPreview] is called. Read-only; the service is owned by this coordinator.
+     */
+    val captureService: CaptureService get() = capture
+
+    /**
+     * The steadiness sensor; the Compose capture screen reads [SteadinessSource.offset]
+     * and [SteadinessSource.isSteady] to drive the steadiness overlay.
+     */
+    val steadinessSource: SteadinessSource get() = steadiness
+
+    // -----------------------------------------------------------------------
     // Derived state
     // -----------------------------------------------------------------------
 
