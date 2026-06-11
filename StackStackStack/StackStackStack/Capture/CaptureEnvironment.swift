@@ -9,18 +9,19 @@ struct CaptureEnvironment {
     var batteryCharging: () -> Bool
     var freeDiskBytes: () -> Int64
 
-    /// Real system probes. Battery monitoring is enabled lazily on first read.
+    /// Real system probes. Battery monitoring is enabled once here in the factory body (MainActor);
+    /// the closures are MainActor-only by contract — the coordinator (the sole caller) is @MainActor —
+    /// so they may safely read UIDevice without re-enabling monitoring on each call. (Fix 5)
     @MainActor
     static func live() -> CaptureEnvironment {
-        CaptureEnvironment(
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        return CaptureEnvironment(
             thermalState: { ProcessInfo.processInfo.thermalState },
             batteryLevel: {
-                UIDevice.current.isBatteryMonitoringEnabled = true
-                return UIDevice.current.batteryLevel
+                UIDevice.current.batteryLevel
             },
             batteryCharging: {
-                UIDevice.current.isBatteryMonitoringEnabled = true
-                return UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full
+                UIDevice.current.batteryState == .charging || UIDevice.current.batteryState == .full
             },
             freeDiskBytes: {
                 // A failed probe must never wrongly block the shutter — report "plenty".

@@ -123,10 +123,11 @@ final class StackCaptureCoordinator: ObservableObject {
             environmentNote = nil; lastError = "Not enough storage to capture."; return
         }
         let battery = environment.batteryLevel()
-        if battery >= 0 && battery < CaptureEnvironment.lowBatteryThreshold && !environment.batteryCharging() {
-            environmentNote = "Low battery"
-        } else if thermal == .serious {
+        // Thermal wins over battery: .serious halves the burst (the note explains the shortened shot).
+        if thermal == .serious {
             environmentNote = "Device is warm — shorter bursts"
+        } else if battery >= 0 && battery < CaptureEnvironment.lowBatteryThreshold && !environment.batteryCharging() {
+            environmentNote = "Low battery"
         } else {
             environmentNote = nil
         }
@@ -141,7 +142,7 @@ final class StackCaptureCoordinator: ObservableObject {
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
         photosExportNote = nil               // clear any prior export failure note
         aeAfLocked = false                   // a long-press lock is superseded once a shot begins
-        let recipe = makeRecipe(for: mode)
+        let recipe = makeRecipe(for: mode, thermal: thermal)
         isCapturing = true
         capturedCount = 0
         captureTotal = recipe.frameCount
@@ -200,10 +201,11 @@ final class StackCaptureCoordinator: ObservableObject {
     /// `burst` (the edge sliders) plus any manual Pro exposure overrides; static looks use the fixed
     /// per-look recipe with the full Pro overrides. Called synchronously from `shoot()` before any
     /// `await`, so `self.pro`/`self.burst` reflect their shutter-press values without a local snapshot.
+    /// `thermal` is passed in from shoot() — already read once there; we never re-read it here.
     /// When the thermal state is `.serious`, the burst is halved (floor, min 2) so the device cools
     /// during shorter stacks; sweep steps track frameCount per the established invariant. (spec 2026-06-11 §2)
     /// (design 2026-06-07 §5)
-    private func makeRecipe(for mode: StackMode) -> CaptureRecipe {
+    private func makeRecipe(for mode: StackMode, thermal: ProcessInfo.ThermalState) -> CaptureRecipe {
         var recipe: CaptureRecipe
         if mode.isLongExposure {
             recipe = CaptureRecipe(frameCount: burst.photoCount,
@@ -215,7 +217,7 @@ final class StackCaptureCoordinator: ObservableObject {
             recipe = CaptureRecipe.recipe(for: mode).applying(pro)
         }
         // Thermal throttle: halve the burst when the device is seriously hot so it cools faster.
-        if environment.thermalState() == .serious {
+        if thermal == .serious {
             recipe.frameCount = max(2, recipe.frameCount / 2)
             if let s = recipe.focusSweep {
                 recipe.focusSweep = .init(near: s.near, far: s.far, steps: recipe.frameCount)
@@ -357,6 +359,13 @@ final class StackCaptureCoordinator: ObservableObject {
                     else { throw ProcessingError.focusStackFailed }
                     result = stacked
                     referencePixels = nil
+                } else if mode.isLongExposure {
+                    // Streaming: align + fold one frame at a time — peak memory is O(1) warped frames,
+                    // not O(N) aligned frames. Cancellable between folds. (Fix: fallback memory bomb)
+                    let (res, ref) = try Pipeline.reduceImagesStreamingWithReference(images, mode: mode,
+                                                                                     shouldCancel: shouldCancel)
+                    result = res
+                    referencePixels = ref
                 } else {
                     if shouldCancel() { throw CancellationError() }
                     let (res, ref) = Pipeline.reduceImagesWithReference(images, mode: mode,
@@ -377,13 +386,17 @@ final class StackCaptureCoordinator: ObservableObject {
             // path and the HEIC-fallback branch — eliminates the duplicate work and textual
             // duplication. (spec 2026-06-11 §6)
             let refRGBA = orientedRef.map { OutputTransform.encodeSRGB8($0) }
+            // Bind the reference pair once so both the happy-path and the HEIC-fallback branch
+            // share it without force-unwrapping. (Fix 6 — no `!` on orientedRef anywhere)
+            let refPair: (pixels: PixelImage, rgba: [UInt8])? = orientedRef.flatMap { ref in
+                refRGBA.map { (ref, $0) }
+            }
             do {
                 let data = try encode(rgba, oriented.width, oriented.height, format, 0.95)
                 // Encode the reference in the SAME format the result ended up with; wrap in try? so a
                 // reference encode failure never loses the main result. (spec 2026-06-11 §6)
-                let refData = refRGBA.flatMap { rBytes -> Data? in
-                    let ref = orientedRef!
-                    return try? encode(rBytes, ref.width, ref.height, format, 0.95)
+                let refData = try? refPair.flatMap { pair -> Data? in
+                    try encode(pair.rgba, pair.pixels.width, pair.pixels.height, format, 0.95)
                 }
                 return (data, refData, format)
             } catch where format == .heic {
@@ -391,9 +404,8 @@ final class StackCaptureCoordinator: ObservableObject {
                 // (develop+align+stack) is never re-run. Both result and reference fall back together
                 // so the pair always shares one format. (spec §8)
                 let data = try encode(rgba, oriented.width, oriented.height, .jpeg, 0.95)
-                let refData = refRGBA.flatMap { rBytes -> Data? in
-                    let ref = orientedRef!
-                    return try? encode(rBytes, ref.width, ref.height, .jpeg, 0.95)
+                let refData = try? refPair.flatMap { pair -> Data? in
+                    try encode(pair.rgba, pair.pixels.width, pair.pixels.height, .jpeg, 0.95)
                 }
                 return (data, refData, .jpeg)
             }

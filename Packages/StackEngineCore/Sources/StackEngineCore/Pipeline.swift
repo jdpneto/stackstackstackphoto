@@ -159,6 +159,29 @@ public enum Pipeline {
         return MotionComposite.blend(staticBase: base, effect: streaks, mask: mask)
     }
 
+    /// Streaming reduce over already-developed frames (the non-RAW fallback): aligns each frame to
+    /// the FIRST frame (anchor) and folds it immediately, so peak memory is the input array plus
+    /// one warped frame — never a second full aligned array. Long-exposure looks only.
+    /// (spec 2026-06-11 §3; mirrors reduceStreamingWithReference's anchor semantics)
+    public static func reduceImagesStreamingWithReference(_ imgs: [PixelImage], mode: StackMode,
+                                                          searchRange: Int = 8,
+                                                          shouldCancel: () -> Bool = { false }) throws -> (result: PixelImage, reference: PixelImage) {
+        precondition(!imgs.isEmpty, "need at least one frame")
+        precondition(mode.isLongExposure, "images streaming supports long-exposure looks only")
+        let reference = imgs[0]
+        let refSmall = downscaleOne(reference, maxEdge: alignmentEstimateEdge)
+        let factor = Float(reference.width) / Float(refSmall.width)
+        let result = try streamingReduce(count: imgs.count, mode: mode, shouldCancel: shouldCancel) { i in
+            if i == 0 { return reference }
+            let movSmall = downscaleOne(imgs[i], maxEdge: alignmentEstimateEdge)
+            let ts = AffineAligner.estimate(reference: refSmall, moving: movSmall,
+                                            translationSearch: searchRange, robustClip: alignmentRobustClip)
+            let t = Transform2D(a: ts.a, b: ts.b, c: ts.c, d: ts.d, tx: ts.tx * factor, ty: ts.ty * factor)
+            return AffineAligner.warp(imgs[i], by: t)
+        }
+        return (result, reference)
+    }
+
     /// End-to-end streaming stack for the long-exposure looks, ALSO returning the anchor (frame 0 at
     /// working resolution) — it is already held alive for alignment; returning it costs nothing.
     /// (spec 2026-06-11 §3)

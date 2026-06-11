@@ -4,7 +4,6 @@ import StackEngineCore
 enum CaptureError: LocalizedError {
     case permissionDenied
     case noDevice
-    case noRawFormat
     case noFramesProduced
     case busy
 
@@ -12,7 +11,6 @@ enum CaptureError: LocalizedError {
         switch self {
         case .permissionDenied: return "Camera access is off. Enable it in Settings ▸ Privacy ▸ Camera."
         case .noDevice:         return "No camera is available on this device."
-        case .noRawFormat:      return "This device's camera doesn't support RAW capture."
         case .noFramesProduced: return "Couldn't read the captured frames. Please try again."
         case .busy:             return "A capture is already in progress."
         }
@@ -59,6 +57,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private var sweepPositions: [Float] = []     // Depth: per-frame lens positions; empty = no sweep
     private var manualLensSupported = true       // probed at configure; optimistic until then
     private var rawSupported = true              // probed at configure; optimistic until then
+    private var hevcSupported = false            // probed at configure on sessionQueue; read on stateQueue
     // Touched only on sessionQueue.
     private var configured = false
     // Computed once at configure (sessionQueue), read when building each capture's settings. The
@@ -114,9 +113,11 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
     }
 
-    /// Long-edge pixel cap for HEIC fallback decode — matches the managed working resolution so
-    /// frames land at the same size as the RAW path's post-develop downscale. (spec 2026-06-11 §3)
-    private static let fallbackDecodeLongEdge = 2400
+    /// Long-edge pixel cap for HEIC fallback decode. Standard-quality ceiling (bible §5.3): 1500 px
+    /// keeps a 30-frame fallback burst ≈ 0.8 GB instead of ≈ 2 GB at 2400 px — the fallback serves
+    /// exactly the hardware that can least afford the difference. Independent of the RAW path's
+    /// managedWorkingResolution by design.
+    private static let fallbackDecodeLongEdge = 1500
 
     /// Issue the next capture in the burst, or finish if none remain. Must run on `stateQueue`.
     /// In-flight RAW requests are bounded to exactly one — the still-image (Iris) pipeline bails
@@ -147,12 +148,19 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
         self.gateAttempts = 0   // reset for the next frame
 
-        // Settings: Bayer RAW on supported hardware; HEIC on the non-RAW fallback path.
+        // Settings: Bayer RAW on supported hardware; HEIC/JPEG on the non-RAW fallback path.
         // NOT `?? rawTypes.first`: feeding an unsupported format to rawPixelFormatType raises an
-        // uncatchable NSException; HEIC is always safe and is the only other path. (spec 2026-06-11 §3)
-        let settings: AVCapturePhotoSettings = self.fallbackHEIC
-            ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
-            : AVCapturePhotoSettings(rawPixelFormatType: self.rawType)
+        // uncatchable NSException; the fallback uses HEVC where the hardware lists it (probed once
+        // in ensureConfigured on sessionQueue into hevcSupported), otherwise default JPEG settings —
+        // never construct settings with a codec the output doesn't advertise. (spec 2026-06-11 §3, Fix 3)
+        let settings: AVCapturePhotoSettings
+        if self.fallbackHEIC {
+            settings = self.hevcSupported
+                ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+                : AVCapturePhotoSettings()
+        } else {
+            settings = AVCapturePhotoSettings(rawPixelFormatType: self.rawType)
+        }
         settings.photoQualityPrioritization = .speed   // minimize per-frame capture latency
         let id = settings.uniqueID
         self.currentID = id
@@ -281,7 +289,15 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     self.stateQueue.async { self.manualLensSupported = lensSupported }
                     let rawOK = self.output.availableRawPhotoPixelFormatTypes
                         .contains(where: { RawFrameConverter.isSupportedBayerFormat($0) })
-                    self.stateQueue.async { self.rawSupported = rawOK }
+                    // Probe HEVC availability once here on sessionQueue (the only queue where output
+                    // configuration is safe to read). Constructing AVCapturePhotoSettings with a codec
+                    // not in availablePhotoCodecTypes raises an uncatchable NSException — guard it here
+                    // rather than at each frame's settings build. (Fix 3)
+                    let hevcOK = self.output.availablePhotoCodecTypes.contains(.hevc)
+                    self.stateQueue.async {
+                        self.rawSupported = rawOK
+                        self.hevcSupported = hevcOK
+                    }
                     // No RAW capability is NOT a configure failure — the burst falls back to HEIC ("Standard quality") and the rawSupported probe reports it.
                     cont.resume()
                 } catch {
