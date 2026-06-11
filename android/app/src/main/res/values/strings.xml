@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Stack Stack Stack</string>
+    <!-- Camera permission rationale strings. -->
+    <string name="camera_permission_rationale">Stack Stack Stack needs camera access to capture photo bursts for stacking.</string>
+</resources>

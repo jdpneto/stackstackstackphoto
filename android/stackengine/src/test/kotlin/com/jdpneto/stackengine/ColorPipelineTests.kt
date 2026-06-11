@@ -137,4 +137,69 @@ class ColorPipelineTests {
         assertEquals(4, out.height)
         assertTrue(out[2, 2].x.isFinite() && out[2, 2].x > 0f)
     }
+
+    /**
+     * Verify that the FUSED binned-develop path ([fusedBinDemosaic] + color matrix, called via
+     * [ColorPipeline.processBinned]) produces bit-for-bit IDENTICAL results to the
+     * straightforward unfused reference (linearizeAndBalance → binDemosaic + color matrix).
+     *
+     * The unfused reference is defined locally here — it is NOT a public API and is kept
+     * private to this test so it cannot be called on the hot path.
+     *
+     * Max abs diff must be EXACTLY 0 (same float ops, same order → same IEEE-754 result).
+     */
+    @Test
+    fun fusedBinnedDevelopMatchesUnfusedReference() {
+        // Use a frame with non-trivial gains and a non-identity color matrix so every code path
+        // in the fused implementation exercises WB + color-matrix application.
+        val w = 16; val h = 12
+        val mosaic = IntArray(w * h) { i ->
+            // Vary raw values so no degenerate constant row/column is present.
+            200 + (i * 37) % 600
+        }
+        val swapRB = floatArrayOf(0f, 0f, 1f,  0f, 1f, 0f,  1f, 0f, 0f)  // B↔R swap
+        val frame = RawSensorFrame.fromIntMosaic(
+            w, h, mosaic,
+            blackLevel = 64f, whiteLevel = 1024f,
+            cfa = CFAPattern.RGGB,
+            wbGains = Vec3(1.5f, 1.0f, 2.0f),
+            colorMatrix = swapRB
+        )
+
+        // Reference: unfused (the two-step path the fused replaces).
+        val unfusedDemosaiced = binDemosaic(linearizeAndBalance(frame), w, h, frame.cfa)
+        // Apply color matrix in the same way ColorPipeline.develop does (mutate in place).
+        val m = frame.colorMatrix
+        val n = unfusedDemosaiced.pixelCount
+        for (i in 0 until n) {
+            val base = i * 3
+            val v = Vec3(unfusedDemosaiced.pixels[base], unfusedDemosaiced.pixels[base + 1], unfusedDemosaiced.pixels[base + 2])
+            val mv = Vec3(
+                m[0] * v.x + m[3] * v.y + m[6] * v.z,
+                m[1] * v.x + m[4] * v.y + m[7] * v.z,
+                m[2] * v.x + m[5] * v.y + m[8] * v.z
+            )
+            unfusedDemosaiced.pixels[base]     = mv.x
+            unfusedDemosaiced.pixels[base + 1] = mv.y
+            unfusedDemosaiced.pixels[base + 2] = mv.z
+        }
+
+        // Fused: the production path.
+        val fused = ColorPipeline.processBinned(frame)
+
+        // Both paths must produce identical dimensions.
+        assertEquals(w / 2, fused.width)
+        assertEquals(h / 2, fused.height)
+        assertEquals(unfusedDemosaiced.width, fused.width)
+        assertEquals(unfusedDemosaiced.height, fused.height)
+
+        // Max abs diff must be exactly 0 — same ops, same IEEE-754 order.
+        var maxDiff = 0f
+        for (i in fused.pixels.indices) {
+            val diff = kotlin.math.abs(fused.pixels[i] - unfusedDemosaiced.pixels[i])
+            if (diff > maxDiff) maxDiff = diff
+        }
+        assertEquals(0f, maxDiff, absoluteTolerance = 0f,
+            message = "fusedBinDemosaic diverged from unfused reference: max abs diff = $maxDiff")
+    }
 }

@@ -285,16 +285,49 @@ object Pipeline {
     ).first
 
     /**
-     * Diagnostic: the developed + working-resolution frames that [reduceImages] feeds to alignment.
-     * Lets the app dump the exact alignment input for offline debugging of handheld registration.
+     * Peak resident set of the BATCH align+reduce path ([reduceImagesWithReference] and friends),
+     * in working-resolution frame-equivalents, for an N-frame stack:
+     *
+     *   held inputs N (the developed frames stay live through alignment)
+     *   + aligned/warped copies N ([alignedStackWithRefIdx] materializes the full aligned list)
+     *   + luma planes N/3 (one single-channel float plane per frame, 1/3 of an RGB frame)
+     *   + ~3 frames of slack (reference selection, downscaled estimate copies, reducer transients)
+     *
+     * Owned by the engine because it encodes THIS file's batch internals — callers (the app's
+     * heap-aware working-resolution budget) must not hard-code these coefficients, or an engine
+     * refactor silently invalidates their memory math.
+     */
+    fun batchPeakFrameEquivalents(frameCount: Int): Double =
+        2.0 * frameCount + frameCount / 3.0 + 3.0
+
+    /**
+     * Width of the develop fan-out. Each worker transiently holds one FULL-SIZE developed frame
+     * (~38 MB for a 12 MP sensor's binned develop) before it is downscaled to the working
+     * resolution, so bounding the width bounds the transient memory spike on small-heap devices
+     * (Android's Java heap is 512 MB on a Pixel even with largeHeap). Width does not affect
+     * results — develop+downscale is a pure per-item op written to order-preserving slots.
+     */
+    private val developParallelism: Int
+        get() = min(Runtime.getRuntime().availableProcessors(), 4)
+
+    /**
+     * The developed + working-resolution frames that the batch looks feed to alignment (also the
+     * app's diagnostic dump of the exact alignment input for offline registration debugging).
+     *
+     * Develop and downscale are FUSED per frame: each worker's full-size developed frame is
+     * transient and only its downscaled copy is retained — vs. developing ALL frames first and
+     * downscaling after, which holds the full-size set and the downscaled set simultaneously
+     * (the batch-path OOM on small-heap devices). Bit-identical to the unfused order.
      */
     fun developedFrames(
         frames: List<RawSensorFrame>, binnedDevelop: Boolean, workingResolution: Int?
-    ): List<PixelImage> {
-        val developed = parallelMap(frames) {
-            if (binnedDevelop) ColorPipeline.processBinned(it) else ColorPipeline.process(it)
+    ): List<PixelImage> = parallelMap(frames, maxParallel = developParallelism) {
+        val developed = if (binnedDevelop) ColorPipeline.processBinned(it) else ColorPipeline.process(it)
+        if (workingResolution != null && workingResolution >= 1) {
+            downscaleOne(developed, workingResolution)   // full-size frame dies here, per worker
+        } else {
+            developed
         }
-        return downscale(developed, workingResolution)
     }
 
     /**
@@ -307,22 +340,27 @@ object Pipeline {
         workingResolution: Int? = null, binnedDevelop: Boolean = false
     ): PixelImage {
         // Develop is the dominant cost (a full demosaic per frame) and each frame is independent.
-        val developed = parallelMap(frames) {
-            if (binnedDevelop) ColorPipeline.processBinned(it) else ColorPipeline.process(it)
-        }
+        // Fused develop→downscale (see developedFrames) keeps only working-resolution frames
+        // resident; the downscale inside reduceImages is then a no-copy pass-through.
+        val developed = developedFrames(frames, binnedDevelop, workingResolution)
         return reduceImages(developed, mode, searchRange, workingResolution)
     }
 
     /**
      * Halve (Gaussian reduce) each frame until its long edge is within [maxEdge] (null = no downscale).
      * Frames start equal-size and reduce deterministically, so they stay equal-size.
+     * Already-fitting frames pass through by reference (no pixel copies), so callers that
+     * pre-downscaled (e.g. [developedFrames]) pay nothing here.
      */
     private fun downscale(imgs: List<PixelImage>, maxEdge: Int?): List<PixelImage> {
         if (maxEdge == null || maxEdge < 1) return imgs   // <1 would loop forever (reduce floors at 1)
         return parallelMap(imgs) { downscaleOne(it, maxEdge) }
     }
 
-    /** Halve (Gaussian reduce) one image until its long edge is within [maxEdge] (≥ 1). */
+    /**
+     * Halve (Gaussian reduce) one image until its long edge is within [maxEdge] (≥ 1).
+     * Returns [img] itself (no copy) when it already fits.
+     */
     private fun downscaleOne(img: PixelImage, maxEdge: Int): PixelImage {
         var out = img
         while (maxOf(out.width, out.height) > maxEdge) { out = ImagePyramid.reduce(out) }

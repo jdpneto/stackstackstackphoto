@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Camera permission: required for CaptureService (AVCapture equivalent on Android). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- RAW capture is used when the hardware supports it; not required — JPEG fallback is used
+         on devices without a Bayer RAW-capable camera (e.g. the emulator). (spec §2, §4 table) -->
+    <uses-feature android:name="android.hardware.camera2" android:required="true" />
+    <uses-feature android:name="android.hardware.camera2.full" android:required="false" />
+
+    <!-- Battery monitoring for CaptureEnvironment. -->
+    <uses-permission android:name="android.permission.BATTERY_STATS" />
+
+    <!--
+        CPU stacking engine: N working-resolution float frames live at once — the default 256 MB
+        heap cannot hold a burst. largeHeap lifts the ceiling to ~512 MB on most devices.
+    -->
+    <application
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:allowBackup="false"
+        android:supportsRtl="true"
+        android:largeHeap="true">
+
+        <!--
+            configChanges: handle rotation/resize in-process (Compose re-lays-out on its own).
+            Without this, rotating mid-stack recreated the activity — losing coordinator state,
+            leaking the open camera, and constructing a second LibraryStore over the same index.json.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            FileProvider: shares result files with ACTION_SEND (the share sheet).
+            The authority must match the string used in PhotoDetailScreen's FileProvider.getUriForFile call.
+            Mirrors the iOS UIActivityViewController that shares the result file URL.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+
+</manifest>

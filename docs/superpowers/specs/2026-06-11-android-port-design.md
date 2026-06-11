@@ -52,4 +52,8 @@ JDK 21 (Temurin), Android SDK (platform 35, build-tools, NDK), cached Gradle 8.1
 
 ## 6. Honesty rules
 
-Anything not verifiable here is labeled, not claimed: Camera2 RAW on real hardware, HEIC encode behavior across OEMs, MediaStore on physical devices. The emulator pass + JVM golden parity are the claims this port stands on.
+Anything not verifiable here is labeled, not claimed.
+
+**Updated 2026-06-11 (Pixel 10 Pro device pass, Release build).** Camera2 RAW on real hardware is now **claimed**: all five looks captured RAW end-to-end on a physical Pixel 10 Pro — real per-frame WB gains/black level/color matrix (SENSOR_TIMESTAMP join), correct orientation, EXIF, the Apple-epoch index.json contract, and thermal-halved bursts all verified on device (results table in `docs/2026-06-11-manual-device-test-plan.md`; device-only fixes and the two Android deviations are recorded in the delta doc).
+
+Still **labeled**, not claimed: HEIC encode on a HEIC-capable device path (only the Robolectric-verified fallback is exercised), MediaStore export round-trip on physical devices, and OEM breadth (non-Pixel RAW devices). The claims this port now stands on: JVM golden parity (bit-exact), the emulator pass, and the Pixel 10 Pro device pass.
