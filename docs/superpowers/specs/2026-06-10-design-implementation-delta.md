@@ -2,7 +2,7 @@
 
 - **Date:** 2026-06-10
 - **Design reference:** `2026-06-04-stack-stack-stack-photography-design.md` (section numbers below refer to it)
-- **Scope:** the iOS app (`StackStackStack/`) + engine (`Packages/StackEngineCore/`). Android is entirely unstarted and is not itemized here.
+- **Scope:** the iOS app (`StackStackStack/`) + engine (`Packages/StackEngineCore/`). The Android port has its own status section below; only its deviations from the iOS behavior are itemized.
 - **Purpose:** the authoritative gap list for planning future implementation phases. When an item ships, remove it from here (or mark it done with the PR number).
 
 ---
@@ -140,8 +140,12 @@ Engine has: modified-Laplacian 5×5 sharpness, guided-filter-regularized selecti
 
 ## Android port status (begun 2026-06-11)
 
-- **Engine (`android/stackengine`) — DONE:** pure Kotlin/JVM 1:1 port of all 26 StackEngineCore files + 144 ported tests. **Golden-corpus parity is bit-exact** (∞ PSNR / SSIM 1.0 / ΔE 0.0 on all five looks vs the SAME committed reference PNGs, mutation-checked), real-bracket heavy tier green (breathing pins 1.030→0.973 hold under javax.imageio decoding). Port spec: `2026-06-11-android-port-design.md`.
-- **App layer (P4–P6)** — pending: Compose UI, Camera2 capture, store/settings/exporter mirrors; emulator-verifiable end-to-end (the emulator exercises the non-RAW fallback genuinely).
+- **Engine (`android/stackengine`) — DONE (PR #37):** pure Kotlin/JVM 1:1 port of all 26 StackEngineCore files, now at 153 tests. **Golden-corpus parity is bit-exact** (∞ PSNR / SSIM 1.0 / ΔE 0.0 on all five looks vs the SAME committed reference PNGs, mutation-checked), real-bracket heavy tier green (breathing pins 1.030→0.973 hold under javax.imageio decoding). Port spec: `2026-06-11-android-port-design.md`.
+- **App layer (P4–P6, `android/app`) — DONE + device-verified (2026-06-11, Pixel 10 Pro, Release build):** 1:1 Compose port of the iOS app — capture / gallery / detail / editor / settings / onboarding — with 146 Robolectric tests green. Real-device pass: **all five looks captured RAW end-to-end** (Detail 12 s, Smooth 30 s, Trails 30 s, Night 12 s, Depth with a real focus sweep 30 s), correct landscape orientation, EXIF (ISO/shutter/Software), the Apple-epoch `index.json` contract, and thermal-halved bursts observed working ("Device is warm — shorter bursts").
+- **Device bring-up findings, fixed along the way** (each device-only — invisible to the emulator and Robolectric): 256 MB Java-heap OOM in develop (largeHeap + a fused linearize+bin pass, bit-identical, golden-gated); batch-path OOM → heap-aware working resolution (engine-owned residency model — deviation #11 below); green cast (Camera2 WB gains / black level / color matrix were placeholders — now real per-frame metadata via a `SENSOR_TIMESTAMP` join; Android additionally applies `COLOR_CORRECTION_TRANSFORM` — deviation #12 below); burst wedge (ImageReader buffer exhaustion + counter leak + main-looper timers, all closed); capture-screen result preview swallowing the controls in landscape (Compose doesn't negotiate space like SwiftUI `scaledToFit` — weight-based fix).
+- **/code-review (7 finder angles) → 3 fix waves** (commits 20cddd0, d8aa98b, abe0101): Pro recipe wiring (manual ISO/shutter/focus had been silently dropped), per-burst AE/AF/AWB lock, frame-join race, metering-rect coordinate space, settings→coordinator live sync, orientation wiring, HEIC honesty fallback, atomic-write rename check, plus perf (zero-alloc fused develop, LruCache thumbnails, editor preview without a JPEG round-trip).
+- **Real-capture regression harness:** five Pixel RAW-burst fixture sets under both engines' test resources (`real-captures/<look>/`), env-gated `SSS_REAL_CAPTURES=1`, shared reference PNGs with golden tolerances — a cross-platform real-content contract. Fixtures extracted via the now-wired `dumpFrames` debug intent extra.
+- **Remaining for David (Android hardware):** HEIC capture on a HEIC-capable device path (Robolectric-verified fallback only), MediaStore Photos export round-trip on device, tap-to-focus metering accuracy by eye, Pro manual-exposure visual check, non-Pixel RAW devices, thermal-critical block. Listed in `2026-06-11-manual-device-test-plan.md`.
 
 ## Deliberate deviations to write back into the Bible
 
@@ -157,6 +161,8 @@ The doc's own rule: "Where code and this document disagree, raise it — do not 
 8. Survivors<3 fallback = clipped mean, not median (§13.1).
 9. sRGB piecewise output curve vs. "gamma 2.2 + rolloff" (§12.3) — until P3/rolloff lands, pin whichever is intended.
 10. Blend strength α = full-quality lerp against a stored aligned reference, not the §9.2 proxy-stack draft preview.
+11. **Android working resolution is heap-aware, not the fixed 2400px managed long edge** (§16): the Kotlin engine owns a frame-residency model sized to the JVM heap, so the actual working resolution shrinks with burst size (512 MB largeHeap + 8 frames → ~1008px vs iOS's 2400px). Same scene therefore stacks at a lower resolution on Android — Android-only deviation, forced by the Java heap ceiling.
+12. **Android applies the per-frame Camera2 `COLOR_CORRECTION_TRANSFORM` in develop where iOS ships identity** (§12): real per-frame WB gains / black level / color matrix are joined to each RAW frame via `SENSOR_TIMESTAMP`, and the additional color-correction matrix is part of Android's metadata contract. Android-only deviation — the platforms' developed colors are each correct per their native metadata, not bit-identical across devices.
 
 ---
 

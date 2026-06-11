@@ -19,6 +19,30 @@
 **Open findings:** both FIXED in PR #36 (compact-height scaffold + page-dot clearance), device-verified in both orientations.
 **Remaining for David:** Photos denied path, Delete All, opportunistic thermal/battery/storage-full, non-RAW hardware someday.
 
+## Results — Android (Pixel 10 Pro) — automated device pass, 2026-06-11 (Release build, feat/android-app)
+
+| # | Test | Result |
+|---|---|---|
+| AN1 | All-looks sweep, RAW end-to-end | PASS — Detail 12 s, Smooth 30 s, Trails 30 s, Night 12 s, Depth (real focus sweep) 30 s; all captured RAW via Camera2 and saved on the Release build. |
+| AN2 | Orientation | PASS — landscape captures come out correctly oriented. |
+| AN3 | EXIF | PASS — ISO, shutter, and Software tag present on saved results. |
+| AN4 | index.json contract | PASS — Apple-epoch timestamps honored (the cross-platform store contract). |
+| AN5 | Thermal halving | PASS — "Device is warm — shorter bursts" observed with halved frame counts on a warm device. |
+| AN6 | Java-heap OOM fixes | PASS — develop OOM (largeHeap + fused linearize+bin, bit-identical/golden-gated) and batch-path OOM (heap-aware working resolution — delta deviation #11) both closed; full bursts stack without jetsam. |
+| AN7 | Color correctness | PASS — green cast gone: real per-frame WB gains/black level/color matrix via a SENSOR_TIMESTAMP join, plus COLOR_CORRECTION_TRANSFORM (delta deviation #12). |
+| AN8 | Burst stability | PASS — ImageReader buffer exhaustion, frame-counter leak, and main-looper timer wedges all closed; repeated bursts don't wedge the session. |
+| AN9 | Landscape capture layout | PASS — result preview no longer swallows the controls (weight-based layout; Compose doesn't negotiate space like SwiftUI scaledToFit). |
+
+All AN6–AN9 findings were device-only — invisible to the emulator and Robolectric.
+
+**Remaining for David (Android hardware):**
+- HEIC capture on a HEIC-capable device path (only the Robolectric-verified fallback is exercised so far).
+- MediaStore Photos export round-trip on device.
+- Tap-to-focus metering accuracy by eye.
+- Pro manual exposure visual check.
+- Non-Pixel RAW devices (OEM breadth).
+- Thermal-critical block (opportunistic, same as iOS C8).
+
 
 Draft for discussion. Everything below is simulator-green but needs (or strongly benefits from) a physical-device pass. Ordered by value. Device: David's iPhone (RAW + manual-focus capable), mobile-mcp workflow available.
 

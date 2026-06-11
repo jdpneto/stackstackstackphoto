@@ -80,6 +80,8 @@ One product, progressive disclosure. The look-picker and live preview are identi
 - **Compute:** Vulkan compute shaders (primary), with an optional OpenCV assist for feature detection. OpenGL ES 3.2 compute as a fallback.
 
 > **Implementation status (2026-06-11).** The Android engine shipped as a 1:1 Kotlin/JVM port of the shared `StackEngineCore` algorithms (NOT the per-platform Vulkan stack of §7.4 — see the delta doc's deviation #3) and passes the §18 golden corpus bit-exactly against the iOS reference outputs. Min SDK 33 per §5.2; Camera2 RAW capture and the Compose app are the next phase (see 2026-06-11-android-port-design.md).
+>
+> **Update (2026-06-11, later the same day).** The Android app layer shipped too — a 1:1 Compose port of the iOS app (capture/gallery/detail/editor/settings/onboarding) — and is **device-verified on a Pixel 10 Pro** (Release build): all five looks captured RAW end-to-end via Camera2 with real per-frame WB/black-level/color-matrix metadata, correct orientation, EXIF, and thermal-halved bursts. Two Android-specific deviations are recorded in the delta doc: heap-aware working resolution below iOS's 2400px managed long edge (deviation #11) and per-frame `COLOR_CORRECTION_TRANSFORM` applied where iOS ships identity (deviation #12).
 
 ### 5.3 Capability gating (Android fragmentation is a first-class concern)
 At launch the app probes device capabilities and adapts:
