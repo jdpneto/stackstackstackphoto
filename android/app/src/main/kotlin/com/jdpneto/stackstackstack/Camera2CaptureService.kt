@@ -12,7 +12,9 @@ import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.MeteringRectangle
+import android.hardware.camera2.params.RggbChannelVector
 import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
@@ -47,10 +49,15 @@ import kotlin.math.min
  * RAW capture: uses [CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW] + supported Bayer
  * CFA pattern ([CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT] ∈ {RGGB,GRBG,GBRG,BGGR})
  * → [ImageReader] of format [ImageFormat.RAW_SENSOR] → 16-bit row-stride-aware copy into
- * [RawSensorFrame]. blackLevel from [CaptureResult.SENSOR_BLACK_LEVEL_PATTERN] first entry,
- * whiteLevel from [CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL], wbGains from
- * [CaptureResult.COLOR_CORRECTION_GAINS] (or neutral 1/1/1 if unavailable),
- * colorMatrix identity with a comment for v1 parity.
+ * [RawSensorFrame]. RAW size is capped at [MAX_RAW_AREA_PIXELS] (iOS 12 MP cap parity, PR #27).
+ * blackLevel: average of [CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN]'s four offsets
+ * (iOS averages the per-channel DNG BlackLevel the same way), whiteLevel from
+ * [CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL]. Per-frame color metadata is taken from the
+ * [TotalCaptureResult] paired to the image by SENSOR_TIMESTAMP: wbGains from
+ * [CaptureResult.COLOR_CORRECTION_GAINS] (falling back to gains derived from
+ * [CaptureResult.SENSOR_NEUTRAL_COLOR_POINT], then 1/1/1), colorMatrix from
+ * [CaptureResult.COLOR_CORRECTION_TRANSFORM] (sensor→linear-sRGB, the same role as the iOS
+ * color matrix; identity fallback).
  *
  * Fallback: no RAW capability → [ImageFormat.JPEG] [ImageReader] → [ImageDecoder.rgba8] at
  * [fallbackDecodeLongEdge]=1500 → [OutputTransform.decodeSRGB8] → developed [PixelImage].
@@ -112,6 +119,8 @@ class Camera2CaptureService(
     @Volatile private var _minimumFocusDistance: Float   = 10f   // diopters; optimistic
     @Volatile private var _cfaPattern:           CFAPattern? = null
     @Volatile private var _whiteLevel:           Int         = 1023
+    /** Scalar black level from SENSOR_BLACK_LEVEL_PATTERN (static key, probed at configure). */
+    @Volatile private var _blackLevel:           Float       = 64f
 
     override val supportsDepthOfField: Boolean get() = _supportsDepthOfField
     override val supportsRAWCapture:   Boolean get() = _supportsRAWCapture
@@ -387,6 +396,36 @@ class Camera2CaptureService(
         req.set(CaptureRequest.CONTROL_AWB_LOCK, true)
     }
 
+    // -----------------------------------------------------------------------
+    // Per-frame color metadata (confined to imageHandler thread)
+    // -----------------------------------------------------------------------
+
+    /** Develop metadata for one frame, extracted from its [TotalCaptureResult]. */
+    private class FrameColorMetadata(val wbGains: Vec3, val colorMatrix: FloatArray)
+
+    /**
+     * SENSOR_TIMESTAMP → metadata, written in [captureCallback]'s onCaptureCompleted and consumed
+     * in [rawImageListener]. Both callbacks run on [imageHandler]'s thread (the capture callback
+     * and the reader listener are registered with the same Handler), so no lock is needed.
+     * Bounded: the one-in-flight state machine never has more than one frame pending, but we keep
+     * a few entries in case a conversion is briefly outstanding while the next frame completes.
+     */
+    private val frameColorMeta = ArrayDeque<Pair<Long, FrameColorMetadata>>()
+    private val maxFrameColorMeta = 8
+
+    /**
+     * Find (and remove) the metadata for the image with [timestamp]. Must run on the
+     * [imageHandler] thread. If there is no exact SENSOR_TIMESTAMP match (some HALs stamp the
+     * Image and the CaptureResult from different clocks), fall back to the most recent result:
+     * the burst state machine is strictly one-in-flight + sequential, so the latest completed
+     * result belongs to the in-flight image.
+     */
+    private fun consumeFrameColorMeta(timestamp: Long): FrameColorMetadata? {
+        val idx = frameColorMeta.indexOfFirst { it.first == timestamp }
+        if (idx >= 0) return frameColorMeta.removeAt(idx).second
+        return frameColorMeta.lastOrNull()?.second
+    }
+
     /**
      * Camera2 capture callbacks — all calls hop to stateExecutor before touching burst state.
      * Advancing only in onCaptureCompleted / onCaptureFailed bounds in-flight requests to one.
@@ -403,6 +442,48 @@ class Camera2CaptureService(
             val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)?.toDouble()
             val shutterNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
             val shutterSec = shutterNs?.let { it.toDouble() / 1_000_000_000.0 }
+
+            // Per-frame develop metadata (runs on imageHandler thread — same thread as the
+            // ImageReader listener that consumes it).
+            //
+            // COLOR_CORRECTION_GAINS subtlety: some devices only populate it when
+            // COLOR_CORRECTION_MODE isn't in an auto/HIGH_QUALITY-opaque mode — but for RAW
+            // captures the result is guaranteed to carry the dynamic metadata DngCreator needs
+            // (gains/transform are exactly DNG AsShotNeutral/ColorMatrix inputs), so on a
+            // RAW-capable device these should be present. If gains are still null we fall back
+            // to SENSOR_NEUTRAL_COLOR_POINT-derived gains from the same result, then 1/1/1.
+            val rggb: RggbChannelVector? = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+            val neutral = result.get(CaptureResult.SENSOR_NEUTRAL_COLOR_POINT)
+            val wb: Vec3 = when {
+                rggb != null ->
+                    wbGainsFromRggb(rggb.red, rggb.greenEven, rggb.greenOdd, rggb.blue)
+                neutral != null && neutral.size == 3 ->
+                    // Same quantity as DNG AsShotNeutral that iOS consumes: gains are the
+                    // reciprocal of the neutral point, normalized G=1 (the literal iOS formula).
+                    wbGainsFromNeutralPoint(
+                        neutral[0].toFloat(), neutral[1].toFloat(), neutral[2].toFloat()
+                    )
+                else -> Vec3(1f, 1f, 1f)   // both keys genuinely null — last-resort identity
+            }
+            // COLOR_CORRECTION_TRANSFORM maps white-balanced camera RGB → linear sRGB — the same
+            // role as the iOS converter's color matrix slot. ColorSpaceTransform elements are
+            // row-major; the engine stores column-major (see engineColorMatrixFromRowMajor).
+            val transform: ColorSpaceTransform? = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
+            val matrix: FloatArray = if (transform != null) {
+                val rowMajor = FloatArray(9)
+                for (row in 0 until 3) {
+                    for (col in 0 until 3) {
+                        rowMajor[row * 3 + col] = transform.getElement(col, row).toFloat()
+                    }
+                }
+                engineColorMatrixFromRowMajor(rowMajor)
+            } else {
+                RawSensorFrame.IDENTITY_3X3.copyOf()   // no transform reported → identity fallback
+            }
+            result.get(CaptureResult.SENSOR_TIMESTAMP)?.let { ts ->
+                frameColorMeta.addLast(ts to FrameColorMetadata(wb, matrix))
+                while (frameColorMeta.size > maxFrameColorMeta) frameColorMeta.removeFirst()
+            }
 
             stateExecutor.execute {
                 stateLock.withLock {
@@ -515,11 +596,15 @@ class Camera2CaptureService(
             }
         }
 
+        // Pair the image with its TotalCaptureResult's color metadata HERE, on the imageHandler
+        // thread (same thread that wrote it in onCaptureCompleted), before hopping executors.
+        val colorMeta = consumeFrameColorMeta(image.timestamp)
+
         // Convert off the callback thread (the 12 MP buffer copy must not block Camera2).
         val convExecutor = Executors.newSingleThreadExecutor()
         convExecutor.execute {
             val frame: RawSensorFrame? = try {
-                if (!isFB) convertRawImage(image) else null
+                if (!isFB) convertRawImage(image, colorMeta) else null
             } catch (_: Exception) { null } finally { image.close() }
 
             stateExecutor.execute {
@@ -590,17 +675,23 @@ class Camera2CaptureService(
     /**
      * Convert a [ImageFormat.RAW_SENSOR] [Image] to a [RawSensorFrame].
      *
+     * iOS spec is `RawFrameConverter.swift` — same semantics, Camera2 metadata sources:
      * - Width/height from [Image.getWidth]/[Image.getHeight].
      * - Pixel data: plane 0, 16-bit little-endian, row-stride-aware copy (rowStride may exceed
      *   width*2 on some hardware — copy only the valid pixel columns).
-     * - blackLevel: first value from [CaptureResult.SENSOR_BLACK_LEVEL_PATTERN] (from result
-     *   available via session characteristics; falls back to 64).
+     * - blackLevel: average of [CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN]'s four CFA
+     *   offsets, probed at configure (iOS averages the per-channel DNG BlackLevel array the same
+     *   way). 64 only if the static key was null.
      * - whiteLevel: [CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL] probed at configure.
-     * - wbGains: [CaptureResult.COLOR_CORRECTION_GAINS] (rggb order) or neutral 1/1/1 if null.
-     * - colorMatrix: identity (v1 parity — the engine's colour pipeline re-applies it; the raw
-     *   mosaic data is processed by [ColorPipeline] without a separate matrix transform here).
+     * - wbGains: per-frame [CaptureResult.COLOR_CORRECTION_GAINS] paired by SENSOR_TIMESTAMP
+     *   (green-relative, see [wbGainsFromRggb]); the capture callback falls back to
+     *   [CaptureResult.SENSOR_NEUTRAL_COLOR_POINT]-derived gains, then 1/1/1; [color] == null
+     *   (result never delivered) is the only path to identity gains here.
+     *   Without real gains the un-balanced Bayer (green has 2× the sites) comes out green-cast.
+     * - colorMatrix: per-frame [CaptureResult.COLOR_CORRECTION_TRANSFORM] converted to the
+     *   engine's column-major layout; identity when unreported.
      */
-    private fun convertRawImage(image: Image): RawSensorFrame? {
+    private fun convertRawImage(image: Image, color: FrameColorMetadata?): RawSensorFrame? {
         if (image.format != ImageFormat.RAW_SENSOR) return null
         val w = image.width
         val h = image.height
@@ -622,19 +713,15 @@ class Camera2CaptureService(
         val cfa = _cfaPattern ?: CFAPattern.RGGB   // fall back to RGGB if probe was inconclusive
         val wl  = _whiteLevel.toFloat()
 
-        // wbGains from result — not available in the synchronous callback here (the TotalCaptureResult
-        // arrives in captureCallback); use neutral gains for v1 parity. The engine's ColorPipeline
-        // applies WB in linear light. A production improvement would pass gains from the callback.
-        val gains = Vec3(1f, 1f, 1f)
-
         return RawSensorFrame(
-            width      = w,
-            height     = h,
-            mosaic     = mosaic,
-            blackLevel = 64f,   // conservative fallback; real value from SENSOR_BLACK_LEVEL_PATTERN (v2)
-            whiteLevel = wl,
-            cfa        = cfa,
-            wbGains    = gains
+            width       = w,
+            height      = h,
+            mosaic      = mosaic,
+            blackLevel  = _blackLevel,
+            whiteLevel  = wl,
+            cfa         = cfa,
+            wbGains     = color?.wbGains ?: Vec3(1f, 1f, 1f),
+            colorMatrix = color?.colorMatrix ?: RawSensorFrame.IDENTITY_3X3.copyOf()
         )
     }
 
@@ -692,6 +779,17 @@ class Camera2CaptureService(
         _supportsRAWCapture = rawReady
         _whiteLevel = characteristics.get(CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL) ?: 1023
 
+        // Black level: static SENSOR_BLACK_LEVEL_PATTERN (per-CFA-site 2×2) averaged into the
+        // engine's scalar, mirroring iOS's averaging of the DNG BlackLevel array. 64 stays only
+        // as the null-key fallback. Hardcoding 0/wrong black lifts the black point and wrecks
+        // shadow color (see RawFrameConverter.swift).
+        val blp = characteristics.get(CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN)
+        _blackLevel = if (blp != null) {
+            val ints = IntArray(4)
+            blp.copyTo(ints, 0)
+            blackLevelFromPattern(FloatArray(4) { ints[it].toFloat() })
+        } else 64f
+
         // Manual lens position support (for Depth sweep).
         val minFD = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
         _supportsDepthOfField = minFD != null && minFD > 0f
@@ -725,7 +823,11 @@ class Camera2CaptureService(
             val sizes = characteristics
                 .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?.getOutputSizes(ImageFormat.RAW_SENSOR)
-            val rawSize = sizes?.maxByOrNull { it.width * it.height }
+            // Largest RAW size ≤ ~12.6 MP, else the smallest available — iOS 12 MP cap parity
+            // (PR #27: 48 MP RAW blew the memory ceiling). See chooseRawSize.
+            val rawSize = sizes?.toList()?.let { list ->
+                chooseRawSize(list) { it.width.toLong() * it.height.toLong() }
+            }
             if (rawSize != null) {
                 val reader = ImageReader.newInstance(rawSize.width, rawSize.height, ImageFormat.RAW_SENSOR, /*maxImages=*/2)
                 reader.setOnImageAvailableListener(rawImageListener, imageHandler)
