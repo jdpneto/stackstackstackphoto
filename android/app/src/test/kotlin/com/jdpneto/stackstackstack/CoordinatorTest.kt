@@ -367,6 +367,31 @@ class CoordinatorTest {
     }
 
     // -----------------------------------------------------------------------
+    // CoordinatorUiState derived gates (single source of truth for UI + coordinator)
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun testUiStateDerivedGates() {
+        val idle = CoordinatorUiState()
+        assertFalse(idle.isBusy)
+        assertTrue(idle.tapToFocusEnabled)
+
+        val capturing = idle.copy(isCapturing = true)
+        assertTrue(capturing.isBusy)
+        assertFalse(capturing.tapToFocusEnabled)
+
+        // processingCount alone must gate the tap too — the Compose tap gate previously omitted
+        // it, drawing a focus square the coordinator then ignored.
+        val processing = idle.copy(processingCount = 1)
+        assertTrue(processing.isBusy)
+        assertFalse(processing.tapToFocusEnabled)
+
+        val manual = idle.copy(pro = ProControls(iso = 800.0))
+        assertFalse(manual.isBusy)
+        assertFalse(manual.tapToFocusEnabled)
+    }
+
+    // -----------------------------------------------------------------------
     // Depth
     // -----------------------------------------------------------------------
 
@@ -500,6 +525,39 @@ class CoordinatorTest {
         assertEquals(0xFF.toByte(), ref!![0])
         assertEquals(0xD8.toByte(), ref[1])
         assertEquals(0xFF.toByte(), ref[2])
+    }
+
+    /**
+     * The REAL encoder (no injected failure) on a runtime without HEIC (Robolectric) must route
+     * a HEIC request through the throw→fallback path and produce an HONEST jpeg-labelled record —
+     * never JPEG bytes in a `.heic` file. (spec §3 honesty rule; mirrors the iOS contract where
+     * a HEIC encode failure throws and the coordinator re-encodes as JPEG.)
+     */
+    @Test
+    fun testHeicUnavailableAtRuntimeYieldsHonestJpegRecord() = runTest {
+        if (ImageEncoder.Format.heicCompressFormat != null) {
+            return@runTest   // runtime CAN encode HEIC — covered by testShootHonoursExportFormat
+        }
+        val testDir = File(tempDir, UUID.randomUUID().toString())
+        val store   = LibraryStore(root = testDir)
+        val coord   = StackCaptureCoordinator(
+            capture              = FakeCaptureService(16, 16),
+            store                = store,
+            mainScope            = this,
+            processingDispatcher = StandardTestDispatcher(testScheduler)
+            // NOTE: default encodeImage — the production ImageEncoder, not a test stub.
+        )
+        coord.exportFormat = ImageEncoder.Format.HEIC
+        coord.shoot()
+        advanceUntilIdle()
+        assertNull("fallback must not surface an error", coord.lastError)
+        val rec = store.loadAll().first()
+        assertEquals("record format must be what was ACTUALLY encoded",
+                     ImageEncoder.Format.JPEG, rec.encoderFormat)
+        assertEquals("file extension must match the real bytes", "jpg", store.resultURL(rec).extension)
+        val bytes = store.resultURL(rec).readBytes()
+        assertEquals(0xFF.toByte(), bytes[0])
+        assertEquals(0xD8.toByte(), bytes[1])
     }
 
     @Test

@@ -47,6 +47,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import android.content.pm.PackageManager
+import com.jdpneto.stackstackstack.AppSettings
+
+/**
+ * The camera page's tri-state: the system prompt is reachable ("Enable Camera") unless the
+ * prompt has been shown before AND the permission is still missing — only then is the user's
+ * answer a real denial that requires the Settings deep-link. Pure logic, unit-tested.
+ */
+internal fun shouldShowOpenSettings(requestedBefore: Boolean, permissionGranted: Boolean): Boolean =
+    requestedBefore && !permissionGranted
 
 // ---------------------------------------------------------------------------
 // Onboarding page model (mirrors iOS OnboardingPage)
@@ -87,8 +96,11 @@ private val looks = listOf(
  * First-launch onboarding pager: welcome → the five looks → camera permission page.
  * Skippable everywhere; finishing or skipping calls [onFinish].
  *
- * Camera page requests [Manifest.permission.CAMERA] at runtime. If denied → "Open Settings"
- * deep-links to the app's system-settings page. Mirrors iOS [OnboardingView].
+ * Camera page requests [Manifest.permission.CAMERA] at runtime. The tri-state matters:
+ * `checkSelfPermission == PERMISSION_DENIED` is ALSO true on a fresh install (never-asked), so
+ * "Open Settings" only shows when the prompt was actually shown before and the user denied —
+ * [AppSettings.cameraPermissionRequested] && still denied — mirroring iOS
+ * `authorizationStatus == .denied` (vs `.notDetermined` → "Enable Camera" runtime prompt).
  *
  * The page indicator lives in its own row (not overlapping the page content) so the iOS-specific
  * compact-height overlap bug class can't occur on Android.
@@ -97,22 +109,27 @@ private val looks = listOf(
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun OnboardingScreen(onFinish: () -> Unit) {
+fun OnboardingScreen(settings: AppSettings, onFinish: () -> Unit) {
     val context = LocalContext.current
     val pageCount = 2 + looks.size   // welcome + looks + camera
     val pagerState = rememberPagerState { pageCount }
 
-    // Camera permission state — re-checked on composition so the camera page is always fresh.
+    // Camera permission state — re-checked on page change so the camera page is always fresh.
     var cameraDenied by remember { mutableStateOf(false) }
     LaunchedEffect(pagerState.currentPage) {
-        cameraDenied = ContextCompat.checkSelfPermission(
-            context, Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_DENIED
+        cameraDenied = shouldShowOpenSettings(
+            requestedBefore   = settings.cameraPermissionRequested,
+            permissionGranted = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        )
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
+        // The prompt has now been shown once — a future DENIED check means a real user denial.
+        settings.cameraPermissionRequested = true
         // Continue regardless of the answer (mirrors iOS `AVCaptureDevice.requestAccess { _ in finish() }`).
         onFinish()
     }

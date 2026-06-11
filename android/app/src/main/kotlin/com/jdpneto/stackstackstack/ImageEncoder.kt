@@ -40,17 +40,18 @@ object ImageEncoder {
             }
 
         /**
-         * The [Bitmap.CompressFormat] corresponding to this encoder format.
-         * HEIC is accessed via reflection because [Bitmap.CompressFormat.HEIC] is not present
-         * in the platform SDK stub jar (it exists on-device from API 30+ but isn't exposed
-         * through the compile-time stubs). On runtimes where HEIC is unavailable, compress()
-         * will return false and [ImageEncoderError.FinalizeFailed] is thrown — the coordinator
-         * falls back to JPEG (spec §3 honesty rule: HEIC is OEM-defined).
+         * The [Bitmap.CompressFormat] corresponding to this encoder format, or null when the
+         * runtime cannot encode it. HEIC is accessed via reflection because
+         * [Bitmap.CompressFormat.HEIC] is not present in the platform SDK stub jar (it exists
+         * on-device from API 30+ but isn't exposed through the compile-time stubs). When HEIC
+         * is unavailable this is null and [encode] THROWS — it must never silently write JPEG
+         * bytes into a file labelled `.heic` (spec §3 honesty rule: the coordinator's fallback
+         * re-encodes as JPEG and stamps the record format `jpeg`, mirroring iOS).
          */
-        val bitmapCompressFormat: Bitmap.CompressFormat
+        val bitmapCompressFormat: Bitmap.CompressFormat?
             get() = when (this) {
                 JPEG -> Bitmap.CompressFormat.JPEG
-                HEIC -> heicCompressFormat ?: Bitmap.CompressFormat.JPEG  // fallback in Robolectric
+                HEIC -> heicCompressFormat   // null on runtimes without HEIC (e.g. Robolectric)
             }
 
         companion object {
@@ -111,6 +112,11 @@ object ImageEncoder {
             throw ImageEncoderError.ContextFailed
         }
 
+        // Fail fast when the requested format can't be encoded on this runtime (HEIC is
+        // OEM-defined). Throwing here lets the coordinator's fallback re-encode as JPEG with an
+        // honest format=jpeg record — never JPEG bytes mislabelled as HEIC.
+        val compressFormat = format.bitmapCompressFormat ?: throw ImageEncoderError.FinalizeFailed
+
         // Build an ARGB_8888 Bitmap in sRGB from the RGBA bytes.
         // RGBA8 → ARGB_8888: Android's Bitmap stores ARGB in native byte order via Color.argb();
         // the engine's rgba8 has R at [0], G at [1], B at [2], A at [3] per pixel.
@@ -135,7 +141,7 @@ object ImageEncoder {
         // Compress to the target format.
         val out = ByteArrayOutputStream()
         val q = (quality * 100).toInt().coerceIn(0, 100)
-        val ok = bitmap.compress(format.bitmapCompressFormat, q, out)
+        val ok = bitmap.compress(compressFormat, q, out)
         bitmap.recycle()
         if (!ok) throw ImageEncoderError.FinalizeFailed
 

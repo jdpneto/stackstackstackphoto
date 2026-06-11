@@ -99,6 +99,33 @@ class LibraryStoreTest {
         assertEquals("self-healed", 0, store.loadAll().size)
     }
 
+    /**
+     * `renameTo` returns false instead of throwing. A swallowed rename failure would make save()
+     * report success while the index points at a file that doesn't exist — self-heal would then
+     * silently drop the shot. Force the failure by replacing index.json with a NON-EMPTY
+     * DIRECTORY (a regular file can never be renamed over one).
+     */
+    @Test
+    fun testSaveThrowsWhenAtomicRenameFails() {
+        val store = makeStore()
+        // First save works (also creates index.json).
+        store.save(result = byteArrayOf(0xFF.toByte()), format = ImageEncoder.Format.JPEG,
+                   mode = "noiseReduction", frameCount = 1)
+        // Replace the index with a non-empty directory → persist()'s rename must fail.
+        val indexFile = File(tempDir, "index.json")
+        assertTrue(indexFile.delete())
+        assertTrue(indexFile.mkdirs())
+        File(indexFile, "blocker").writeText("x")
+
+        try {
+            store.save(result = byteArrayOf(0xAA.toByte()), format = ImageEncoder.Format.JPEG,
+                       mode = "noiseReduction", frameCount = 1)
+            fail("save() must throw when the atomic rename fails — not report success")
+        } catch (e: java.io.IOException) {
+            // expected — the rename failure is surfaced, not swallowed
+        }
+    }
+
     @Test
     fun testCorruptIndexIsPreservedNotOverwritten() {
         val store = makeStore()

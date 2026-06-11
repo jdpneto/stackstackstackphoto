@@ -90,12 +90,30 @@ class ImageEncoderTest {
 
     // MARK: - HEIC (runtime-gated — Robolectric's software Bitmap doesn't support HEIC)
 
+    /**
+     * Honesty rule (spec §3, mirrors iOS): when the runtime can't encode HEIC, a HEIC request
+     * must THROW — never silently return JPEG bytes that would be saved as `<uuid>.heic` with
+     * record format "heic" (wrong magic bytes, wrong MIME on share/export). Robolectric has no
+     * HEIC support, so this is exactly the runtime the rule protects.
+     */
+    @Test
+    fun testHeicRequestThrowsWhenRuntimeLacksHeic() {
+        if (ImageEncoder.Format.heicCompressFormat != null) {
+            return   // this runtime CAN encode HEIC — the mislabel scenario can't occur here
+        }
+        val rgba = ByteArray(4 * 4 * 4) { 128.toByte() }
+        assertThrows(ImageEncoderError::class.java) {
+            ImageEncoder.encode(rgba, width = 4, height = 4,
+                                format = ImageEncoder.Format.HEIC, quality = 0.9)
+        }
+    }
+
     @Test
     fun testHeicEncodeGatedOnRuntimeSupport() {
         val rgba = ByteArray(4 * 4 * 4) { 128.toByte() }
         // Probe runtime HEIC support exactly like the iOS Intel-mac XCTSkip pattern:
         // try to encode and check that the output is NOT JPEG (HEIC has different magic bytes).
-        // In Robolectric, the HEIC CompressFormat falls back to JPEG → probe returns false → skip.
+        // In Robolectric, the HEIC request THROWS (honesty rule) → probe returns false → skip.
         val heicSupported = try {
             val probe = ImageEncoder.encode(rgba, width = 4, height = 4,
                                             format = ImageEncoder.Format.HEIC, quality = 0.9)

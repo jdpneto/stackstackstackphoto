@@ -16,6 +16,7 @@ class AppSettings(private val prefs: SharedPreferences) {
         const val SAVE_TO_PHOTOS   = "saveToPhotos"
         const val EXPORT_FORMAT    = "exportFormat"
         const val HAS_SEEN_ONBOARDING = "hasSeenOnboarding"
+        const val CAMERA_PERMISSION_REQUESTED = "cameraPermissionRequested"
     }
 
     /** Mirror every successful save into the system photo library (add-only). Opt-in. */
@@ -38,4 +39,14 @@ class AppSettings(private val prefs: SharedPreferences) {
     var hasSeenOnboarding: Boolean
         get() = prefs.getBoolean(Keys.HAS_SEEN_ONBOARDING, false)
         set(value) = prefs.edit().putBoolean(Keys.HAS_SEEN_ONBOARDING, value).apply()
+
+    /**
+     * Whether the runtime camera-permission prompt has been shown at least once. Android's
+     * `checkSelfPermission` returns DENIED for *never-asked* too, so this flag is what
+     * distinguishes "ask via the system prompt" from "the user denied — deep-link to Settings"
+     * (the equivalent of iOS `authorizationStatus == .denied` vs `.notDetermined`).
+     */
+    var cameraPermissionRequested: Boolean
+        get() = prefs.getBoolean(Keys.CAMERA_PERMISSION_REQUESTED, false)
+        set(value) = prefs.edit().putBoolean(Keys.CAMERA_PERMISSION_REQUESTED, value).apply()
 }

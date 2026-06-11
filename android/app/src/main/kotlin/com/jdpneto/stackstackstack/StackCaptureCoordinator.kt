@@ -85,52 +85,23 @@ data class CoordinatorUiState(
      */
     val environmentNote: String? = null
 ) {
-    // equals/hashCode: exclude lastResultJPEG ByteArray from structural equality (standard Kotlin
-    // data class ByteArray equals compares identity, not content; that's fine for our use).
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is CoordinatorUiState) return false
-        return isCapturing == other.isCapturing &&
-            processingCount == other.processingCount &&
-            (lastResultJPEG?.contentEquals(other.lastResultJPEG ?: ByteArray(0)) ?: (other.lastResultJPEG == null)) &&
-            lastSavedID == other.lastSavedID &&
-            lastError == other.lastError &&
-            supportsDepth == other.supportsDepth &&
-            supportsRAW == other.supportsRAW &&
-            aeAfLocked == other.aeAfLocked &&
-            capturedCount == other.capturedCount &&
-            captureTotal == other.captureTotal &&
-            captureRemainingSeconds == other.captureRemainingSeconds &&
-            mode == other.mode &&
-            pro == other.pro &&
-            burst == other.burst &&
-            exportFormat == other.exportFormat &&
-            saveToPhotosEnabled == other.saveToPhotosEnabled &&
-            photosExportNote == other.photosExportNote &&
-            environmentNote == other.environmentNote
-    }
+    // NOTE: data-class default equals/hashCode are deliberate. lastResultJPEG compares by
+    // ByteArray identity, which is correct here — every finished stack publishes a freshly
+    // allocated array, so identity inequality is exactly "a new result arrived".
 
-    override fun hashCode(): Int {
-        var result = isCapturing.hashCode()
-        result = 31 * result + processingCount
-        result = 31 * result + (lastResultJPEG?.contentHashCode() ?: 0)
-        result = 31 * result + (lastSavedID?.hashCode() ?: 0)
-        result = 31 * result + (lastError?.hashCode() ?: 0)
-        result = 31 * result + supportsDepth.hashCode()
-        result = 31 * result + supportsRAW.hashCode()
-        result = 31 * result + aeAfLocked.hashCode()
-        result = 31 * result + capturedCount
-        result = 31 * result + captureTotal
-        result = 31 * result + captureRemainingSeconds
-        result = 31 * result + mode.hashCode()
-        result = 31 * result + pro.hashCode()
-        result = 31 * result + burst.hashCode()
-        result = 31 * result + exportFormat.hashCode()
-        result = 31 * result + saveToPhotosEnabled.hashCode()
-        result = 31 * result + (photosExportNote?.hashCode() ?: 0)
-        result = 31 * result + (environmentNote?.hashCode() ?: 0)
-        return result
-    }
+    /**
+     * Gates the shutter. Capturing during a background stack is unreliable — the all-core
+     * develop/align/stack starves the camera — so the shutter is disabled while processing too.
+     * Mirrors iOS [isBusy]. (design 2026-06-07 §7)
+     */
+    val isBusy: Boolean get() = isCapturing || processingCount > 0
+
+    /**
+     * Tap-to-focus is available only in full-auto exposure/focus (no manual Pro override) and
+     * while the shutter is free. Single source of truth for BOTH the coordinator gate and the
+     * Compose tap gesture gate. (design tap-to-focus §3.3)
+     */
+    val tapToFocusEnabled: Boolean get() = !isBusy && !pro.hasManualFocusOrExposure
 }
 
 // ---------------------------------------------------------------------------
@@ -306,18 +277,11 @@ class StackCaptureCoordinator(
     // Derived state
     // -----------------------------------------------------------------------
 
-    /**
-     * Gates the shutter. Capturing during a background stack is unreliable — the all-core
-     * develop/align/stack starves the camera — so the shutter is disabled while processing too.
-     * Mirrors iOS [isBusy]. (design 2026-06-07 §7)
-     */
-    val isBusy: Boolean get() = isCapturing || processingCount > 0
+    /** Gates the shutter. Delegates to [CoordinatorUiState.isBusy] — one source of truth. */
+    val isBusy: Boolean get() = _uiState.value.isBusy
 
-    /**
-     * Tap-to-focus is available only in full-auto exposure/focus (no manual Pro override) and
-     * while the shutter is free. (design tap-to-focus §3.3)
-     */
-    val tapToFocusEnabled: Boolean get() = !pro.hasManualFocusOrExposure && !isBusy
+    /** Delegates to [CoordinatorUiState.tapToFocusEnabled] — one source of truth. */
+    val tapToFocusEnabled: Boolean get() = _uiState.value.tapToFocusEnabled
 
     // -----------------------------------------------------------------------
     // Serial processing tail (mirrors iOS processingTail: Task<Void,Never>?)
@@ -441,10 +405,13 @@ class StackCaptureCoordinator(
         try {
             capturedBurst = capture.captureBurst(recipe = recipe, isSteady = isSteady, onProgress = onProgress)
         } catch (e: Exception) {
-            _uiState.update { it.copy(isCapturing = false, lastError = e.message ?: "Capture failed.") }
-            if (mode.usesSteadinessGate) steadiness.stop()
-            countdownJob?.cancel(); countdownJob = null
-            _uiState.update { it.copy(captureRemainingSeconds = 0) }
+            // State only — resource cleanup (steadiness + countdown) is owned by `finally` below,
+            // which runs before this `return` completes.
+            _uiState.update { it.copy(
+                isCapturing             = false,
+                lastError               = e.message ?: "Capture failed.",
+                captureRemainingSeconds = 0
+            ) }
             return
         } finally {
             if (mode.usesSteadinessGate) steadiness.stop()
@@ -463,7 +430,9 @@ class StackCaptureCoordinator(
         }
 
         enqueueProcessing(
-            burst             = capturedBurst,
+            payload           = capturedBurst.payload,
+            frameCount        = capturedBurst.count,
+            info              = capturedBurst.info,
             mode              = mode,
             format            = format,
             orientationTurns  = orientationTurns,
@@ -542,9 +511,16 @@ class StackCaptureCoordinator(
      * Queue develop→align→stack→encode→save behind any earlier job (serial), running the heavy
      * work off the main thread, then publish the result. The shutter stays free meanwhile.
      * Mirrors iOS [enqueueProcessing]. (design 2026-06-07 §7)
+     *
+     * Memory: the closure deliberately captures only [payloadRef] (a one-shot holder that
+     * [makeResult] empties as soon as develop has consumed the frames) plus the pre-snapshotted
+     * [frameCount]/[info] — never the burst itself. Capturing the burst would pin every raw
+     * mosaic (~24 MB each) through align/stack/encode, defeating the heap budget.
      */
     private fun enqueueProcessing(
-        burst: CapturedBurst,
+        payload: CapturedBurst.Payload,
+        frameCount: Int,
+        info: CaptureInfo?,
         mode: StackMode,
         format: ImageEncoder.Format,
         orientationTurns: Int,
@@ -556,7 +532,8 @@ class StackCaptureCoordinator(
         val token = CancellationToken()
         activeTokens.add(token)
         val previous = processingTail
-        val info = burst.info   // snapshot the CaptureInfo alongside the frames
+        // One-shot holder; do NOT reference `payload` inside the launch block (see kdoc above).
+        val payloadRef = java.util.concurrent.atomic.AtomicReference<CapturedBurst.Payload?>(payload)
         processingTail = mainScope.launch {
             previous?.join()   // serialize behind earlier jobs (mirrors iOS `await previous?.value`)
             try {
@@ -564,7 +541,8 @@ class StackCaptureCoordinator(
 
                 val (encodedData, encodedRef, encodedFormat) = withContext(processingDispatcher) {
                     makeResult(
-                        burst            = burst,
+                        payloadRef       = payloadRef,
+                        frameCount       = frameCount,
                         mode             = mode,
                         format           = format,
                         orientationTurns = orientationTurns,
@@ -582,7 +560,7 @@ class StackCaptureCoordinator(
                     reference     = encodedRef,
                     format        = encodedFormat,
                     mode          = mode.storageKey,
-                    frameCount    = burst.count,
+                    frameCount    = frameCount,
                     iso           = info?.iso,
                     shutterSeconds = info?.shutterSeconds
                 )
@@ -615,6 +593,7 @@ class StackCaptureCoordinator(
                     _uiState.update { it.copy(lastError = e.message ?: "Processing failed.") }
                 }
             } finally {
+                payloadRef.set(null)   // cancel/error paths must not pin the frames either
                 activeTokens.remove(token)
                 _uiState.update { it.copy(processingCount = it.processingCount - 1) }
             }
@@ -719,9 +698,16 @@ class StackCaptureCoordinator(
      * [reference] is the encoded aligned anchor frame (same orientation + format as the result);
      * null for depth stacks (no blend semantics) and when the reference encode itself fails (safe
      * degradation — never loses the main result). (spec §8, spec 2026-06-11 §3)
+     *
+     * [payloadRef] is a ONE-SHOT holder: each branch takes the payload exactly once, passing the
+     * frames straight into the consuming pipeline call — so the burst frames become garbage as
+     * soon as develop has consumed them, instead of staying pinned through align/stack/encode.
+     * [frameCount] is the pre-snapshotted burst count (== frames/images size) used everywhere a
+     * size is needed after the payload has been dropped.
      */
     private fun makeResult(
-        burst: CapturedBurst,
+        payloadRef: java.util.concurrent.atomic.AtomicReference<CapturedBurst.Payload?>,
+        frameCount: Int,
         mode: StackMode,
         format: ImageEncoder.Format,
         orientationTurns: Int,
@@ -731,17 +717,25 @@ class StackCaptureCoordinator(
         encode: (ByteArray, Int, Int, ImageEncoder.Format, Double, ImageEncoder.ExifMetadata?) -> ByteArray
     ): Triple<ByteArray, ByteArray?, ImageEncoder.Format> {
 
+        // Empty the holder — after this call nothing outside the consuming pipeline call
+        // references the burst frames.
+        fun takeRawFrames() =
+            (payloadRef.getAndSet(null) as? CapturedBurst.Payload.Raw)?.frames
+                ?: error("burst payload already consumed or wrong type")
+        fun takeDevelopedImages() =
+            (payloadRef.getAndSet(null) as? CapturedBurst.Payload.Developed)?.images
+                ?: error("burst payload already consumed or wrong type")
+
         val result: PixelImage
         var referencePixels: PixelImage? = null   // the aligned anchor; null when !mode.supportsBlendReference
 
-        when (val payload = burst.payload) {
+        when (payloadRef.get()) {
             is CapturedBurst.Payload.Raw -> {
-                val frames = payload.frames
                 // RAW quality path: develop → downscale → align → stack.
                 if (mode.isLongExposure) {
                     // Streaming: one developed+aligned frame in flight at a time; cancellable between frames.
                     val (res, ref) = Pipeline.reduceStreamingWithReference(
-                        frames           = frames,
+                        frames           = takeRawFrames(),
                         mode             = mode,
                         workingResolution = managedWorkingResolution,
                         binnedDevelop    = true,
@@ -755,12 +749,12 @@ class StackCaptureCoordinator(
                     // No blend-strength reference — frames differ by focus, not by time. (spec 2026-06-11 §4)
                     val depthResolution = depthWorkingResolution?.let { preset ->
                         minOf(preset, heapAwareWorkingResolution(
-                            frameCount       = frames.size,
-                            frameEquivalents = depthFrameEquivalents(frames.size)
+                            frameCount       = frameCount,
+                            frameEquivalents = depthFrameEquivalents(frameCount)
                         ))
                     }
                     val developed = Pipeline.developedFrames(
-                        frames           = frames,
+                        frames           = takeRawFrames(),
                         binnedDevelop    = true,
                         workingResolution = depthResolution
                     )
@@ -769,7 +763,7 @@ class StackCaptureCoordinator(
                         images = developed,
                         config = DepthConfig(
                             workingResolution = depthResolution,
-                            maxFrames         = maxOf(frames.size, 1)
+                            maxFrames         = maxOf(frameCount, 1)
                         )
                     ) ?: throw ProcessingError.FocusStackFailed
                     referencePixels = null
@@ -778,9 +772,9 @@ class StackCaptureCoordinator(
                     // working resolution to this heap and the ACTUAL frame count so the resident
                     // set (frames + aligned copies + lumas) fits. Streaming looks keep 2400.
                     val developed = Pipeline.developedFrames(
-                        frames           = frames,
+                        frames           = takeRawFrames(),
                         binnedDevelop    = true,
-                        workingResolution = heapAwareWorkingResolution(frameCount = frames.size)
+                        workingResolution = heapAwareWorkingResolution(frameCount = frameCount)
                     )
                     if (shouldCancel()) throw StackCancellationException()
                     val (res, ref) = Pipeline.reduceImagesWithReference(developed, mode)
@@ -790,7 +784,6 @@ class StackCaptureCoordinator(
             }
 
             is CapturedBurst.Payload.Developed -> {
-                val images = payload.images
                 // Non-RAW fallback: frames are already at working resolution — skip the develop step
                 // and route every look through the images pipeline. (spec 2026-06-11 §3)
                 if (mode == StackMode.DEPTH_OF_FIELD) {
@@ -798,22 +791,22 @@ class StackCaptureCoordinator(
                     // fallback decode size; FocusStacker downscales further only when needed).
                     val depthResolution = depthWorkingResolution?.let { preset ->
                         minOf(preset, heapAwareWorkingResolution(
-                            frameCount       = images.size,
-                            frameEquivalents = depthFrameEquivalents(images.size)
+                            frameCount       = frameCount,
+                            frameEquivalents = depthFrameEquivalents(frameCount)
                         ))
                     }
                     result = FocusStacker.allInFocus(
-                        images = images,
+                        images = takeDevelopedImages(),
                         config = DepthConfig(
                             workingResolution = depthResolution,
-                            maxFrames         = maxOf(images.size, 1)
+                            maxFrames         = maxOf(frameCount, 1)
                         )
                     ) ?: throw ProcessingError.FocusStackFailed
                     referencePixels = null
                 } else if (mode.isLongExposure) {
                     // Streaming: align + fold one frame at a time — peak memory is O(1) warped frames.
                     val (res, ref) = Pipeline.reduceImagesStreamingWithReference(
-                        imgs         = images,
+                        imgs         = takeDevelopedImages(),
                         mode         = mode,
                         shouldCancel = shouldCancel
                     )
@@ -824,14 +817,16 @@ class StackCaptureCoordinator(
                     // Heap-aware here too: fallback frames decode at 1500px, so this is effectively
                     // min(heapAware, 1500) — a no-op pass-through unless the heap demands smaller.
                     val (res, ref) = Pipeline.reduceImagesWithReference(
-                        imgs             = images,
+                        imgs             = takeDevelopedImages(),
                         mode             = mode,
-                        workingResolution = heapAwareWorkingResolution(frameCount = images.size)
+                        workingResolution = heapAwareWorkingResolution(frameCount = frameCount)
                     )
                     result          = res
                     referencePixels = if (mode.supportsBlendReference) ref else null
                 }
             }
+
+            null -> error("burst payload already consumed")
         }
 
         // All cancellation checks precede the encode — a StackCancellationException here is from

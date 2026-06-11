@@ -290,11 +290,22 @@ class LibraryStore(val root: File = defaultRoot()) {
 // MARK: - Extension helpers
 
 /**
- * Atomic write: write to a temp file then rename over the target.
- * Prevents truncated writes from being observable. Mirrors iOS `.atomic` write option.
+ * Atomic write: write to a temp file, fsync it, then rename over the target.
+ * Prevents truncated writes from being observable (old-or-new guarantee: the fsync ensures the
+ * tmp bytes are durable BEFORE the rename makes them visible). Mirrors iOS `.atomic`.
+ *
+ * @throws java.io.IOException when the write or the rename fails — a swallowed rename failure
+ *   would let `save()` report success while the index points at a file that doesn't exist
+ *   (self-heal would then silently drop the shot).
  */
 private fun File.writeAtomically(bytes: ByteArray) {
     val tmp = File(parentFile ?: File("."), "${name}.tmp")
-    tmp.writeBytes(bytes)
-    tmp.renameTo(this)
+    java.io.FileOutputStream(tmp).use { fos ->
+        fos.write(bytes)
+        fos.fd.sync()
+    }
+    if (!tmp.renameTo(this)) {
+        runCatching { tmp.delete() }
+        throw java.io.IOException("Atomic rename failed: ${tmp.name} → $name")
+    }
 }

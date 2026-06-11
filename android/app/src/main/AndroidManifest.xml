@@ -23,9 +23,15 @@
         android:supportsRtl="true"
         android:largeHeap="true">
 
+        <!--
+            configChanges: handle rotation/resize in-process (Compose re-lays-out on its own).
+            Without this, rotating mid-stack recreated the activity — losing coordinator state,
+            leaking the open camera, and constructing a second LibraryStore over the same index.json.
+        -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

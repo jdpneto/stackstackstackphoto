@@ -1,8 +1,10 @@
 package com.jdpneto.stackstackstack.ui
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -33,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -59,7 +62,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.jdpneto.stackengine.StackMode
+import com.jdpneto.stackstackstack.AppSettings
 import com.jdpneto.stackstackstack.Camera2CaptureService
 import com.jdpneto.stackstackstack.usesSteadinessGate
 import com.jdpneto.stackstackstack.CaptureRecipe
@@ -117,13 +124,34 @@ fun CaptureScreen(
     }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> cameraGranted = granted }
+    ) { granted ->
+        // Record that the prompt has been shown — the onboarding camera page's tri-state
+        // ("Enable Camera" vs "Open Settings") depends on it. (mirrors iOS .denied semantics)
+        AppSettings(context.getSharedPreferences("sss_prefs", Context.MODE_PRIVATE))
+            .cameraPermissionRequested = true
+        cameraGranted = granted
+    }
     // Request once on first composition if not already granted; the onboarding page's request
     // stays as is — this guard only fires in the main-tab capture screen.
     LaunchedEffect(Unit) {
         if (!cameraGranted) {
             permissionLauncher.launch(Manifest.permission.CAMERA)
         }
+    }
+    // Re-check on every ON_RESUME: a user who grants the permission in system Settings and
+    // returns must get a live preview, not a permanently black screen (the launcher callback
+    // never fires in that flow).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                cameraGranted = ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.CAMERA
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // The result JPEG decoded to a bitmap — decoded once per new result (no disk read).
@@ -153,7 +181,9 @@ fun CaptureScreen(
         CameraPreview(
             coordinator = coordinator,
             cameraGranted = cameraGranted,
-            tapToFocusEnabled = uiState.let { !it.isCapturing && !it.pro.hasManualFocusOrExposure },
+            // Same derived gate the coordinator itself uses — previously this omitted
+            // processingCount, so the focus square drew while the coordinator ignored the tap.
+            tapToFocusEnabled = uiState.tapToFocusEnabled,
             onFocusTap = { x, y, lock ->
                 coordinator.focusAndExpose(x, y, lock)
                 focusIndicator = Pair(Offset(x, y), lock)
@@ -272,12 +302,27 @@ fun CaptureScreen(
 
             // Shutter button.
             ShutterButton(
-                busy = uiState.isCapturing || uiState.processingCount > 0,
-                onShoot = { scope.launch { coordinator.shoot() } }
+                busy = uiState.isBusy,
+                onShoot = {
+                    // Snapshot the display rotation BEFORE shooting so the stacked result is
+                    // baked upright for the orientation the shot was framed in (mirrors iOS
+                    // reading UIDevice.current.orientation at shutter press,
+                    // StackCaptureCoordinator.swift:141).
+                    coordinator.displayRotation = currentDisplayRotation(context)
+                    scope.launch { coordinator.shoot() }
+                }
             )
         }
     }
 }
+
+/**
+ * The current display rotation ([Surface.ROTATION_*]); [Surface.ROTATION_0] when the context has
+ * no display association. minSdk 33 ⇒ [Context.getDisplay] is always available; it throws
+ * [UnsupportedOperationException] on non-visual contexts, hence the runCatching.
+ */
+private fun currentDisplayRotation(context: Context): Int =
+    runCatching { context.display?.rotation }.getOrNull() ?: Surface.ROTATION_0
 
 // ---------------------------------------------------------------------------
 // Camera preview
@@ -359,7 +404,7 @@ private fun CameraPreview(
 @Composable
 private fun BurstSliders(state: CoordinatorUiState, coordinator: StackCaptureCoordinator) {
     if (!state.mode.isLongExposure || state.isCapturing) return
-    val busy = state.isCapturing || state.processingCount > 0
+    val busy = state.isBusy
 
     Row(
         modifier = Modifier
@@ -492,8 +537,10 @@ private fun SteadinessOverlay(state: CoordinatorUiState, steadiness: MotionStead
         val cx = size.width / 2f
         val cy = size.height / 2f
         val maxShift = (big / 2f - small / 2f) / kotlin.math.sqrt(2.0).toFloat()
+        // Snapshot-state reads (NOT the @Volatile gate fields) — draw-phase reads of snapshot
+        // state re-invalidate this Canvas on every sensor update, keeping the dot live.
         val (offX, offY) = steadiness.offset
-        val dotColor = if (steadiness.isSteady) Color.Green else Color.Red
+        val dotColor = if (steadiness.isSteadyUi) Color.Green else Color.Red
 
         // Big ring
         drawCircle(
@@ -552,7 +599,7 @@ private fun FocusIndicatorOverlay(indicator: Pair<Offset, Boolean>?) {
  */
 @Composable
 private fun LookPicker(state: CoordinatorUiState, coordinator: StackCaptureCoordinator) {
-    val busy = state.isCapturing || state.processingCount > 0
+    val busy = state.isBusy
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -613,7 +660,7 @@ private fun ProPanel(
     showPro: Boolean,
     onToggle: () -> Unit
 ) {
-    val busy = state.isCapturing || state.processingCount > 0
+    val busy = state.isBusy
     Column(
         modifier = Modifier
             .fillMaxWidth()

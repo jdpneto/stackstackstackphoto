@@ -5,6 +5,9 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlin.math.sqrt
 
 /**
@@ -68,11 +71,23 @@ class MotionSteadiness(context: Context) : SteadinessSource {
     private val toleranceRadians = 0.05   // ~2.9° = "steady"
     private val fullScaleRadians = 0.12   // offset reaches the ring edge at ~6.9°
 
+    // @Volatile field: read by the capture gate from the camera's state executor (hot path, no
+    // Compose snapshot machinery needed there).
     @Volatile private var _isSteady: Boolean = true
     override val isSteady: Boolean get() = _isSteady
 
-    /** Normalised offset (x=roll, y=pitch) in -1…1, for the UI overlay. */
-    @Volatile var offset: Pair<Double, Double> = Pair(0.0, 0.0)
+    // Compose snapshot state: the SteadinessOverlay Canvas reads these during draw, so writes
+    // here invalidate the overlay. A plain @Volatile var is invisible to Compose — the overlay
+    // froze at its first frame, exactly when the steadiness guide matters most. The sensor
+    // listener is registered from the main thread (no Handler), so events — and these writes —
+    // are delivered on the main looper; snapshot writes are safe regardless of thread.
+
+    /** Normalised offset (x=roll, y=pitch) in -1…1, for the UI overlay (snapshot-backed). */
+    var offset: Pair<Double, Double> by mutableStateOf(Pair(0.0, 0.0))
+        private set
+
+    /** Snapshot-backed mirror of [isSteady] for the UI overlay's dot colour. */
+    var isSteadyUi: Boolean by mutableStateOf(true)
         private set
 
     /** Reference rotation vector (4 or 5 floats); null until the first event after start(). */
@@ -101,6 +116,7 @@ class MotionSteadiness(context: Context) : SteadinessSource {
             val roll  = orientation[2].toDouble()   // roll  (index 2)
             val (off, steady) = SteadinessMath.evaluate(pitch, roll, toleranceRadians, fullScaleRadians)
             _isSteady = steady
+            isSteadyUi = steady
             offset = off
         }
 
@@ -110,6 +126,7 @@ class MotionSteadiness(context: Context) : SteadinessSource {
     override fun start() {
         stop()  // idempotent; ensures no prior stream races a restart
         _isSteady = true
+        isSteadyUi = true
         offset = Pair(0.0, 0.0)
         referenceQuaternion = null
         val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
@@ -120,6 +137,7 @@ class MotionSteadiness(context: Context) : SteadinessSource {
     override fun stop() {
         sensorManager.unregisterListener(listener)
         _isSteady = true
+        isSteadyUi = true
         referenceQuaternion = null
     }
 

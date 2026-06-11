@@ -1,5 +1,6 @@
 package com.jdpneto.stackstackstack.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -40,14 +41,39 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
+ * The screen's single write path for the export format: persist to [AppSettings] AND push to the
+ * live coordinator, the Android stand-in for iOS's `.onReceive(settings.$exportFormat)` mirror.
+ * Extracted (internal) so Robolectric can exercise exactly what the radio button does.
+ */
+internal fun applyExportFormat(
+    settings: AppSettings,
+    coordinator: StackCaptureCoordinator,
+    format: ImageEncoder.Format
+) {
+    settings.exportFormat    = format
+    coordinator.exportFormat = format
+}
+
+/** Single write path for the Save-to-Photos toggle; see [applyExportFormat]. */
+internal fun applySaveToPhotos(
+    settings: AppSettings,
+    coordinator: StackCaptureCoordinator,
+    enabled: Boolean
+) {
+    settings.saveToPhotos            = enabled
+    coordinator.saveToPhotosEnabled  = enabled
+}
+
+/**
  * Settings screen — 4 sections mirroring iOS [SettingsView]:
  * - Capture & Export (Save to Photos toggle + Format picker)
  * - Storage (stack count, space used, Delete All)
  * - This Device (RAW + Depth capability)
  * - About (version, Replay Introduction)
  *
- * Settings are written through [AppSettings]; the coordinator is synced via the app root's
- * [LaunchedEffect] listeners (same `.onReceive(settings.$exportFormat)` pattern as iOS).
+ * Settings writes go through [applyExportFormat]/[applySaveToPhotos], which persist to
+ * [AppSettings] and sync the live coordinator in one step (same effect as iOS's
+ * `.onReceive(settings.$exportFormat)` mirroring — without restart-only dead wiring).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -66,17 +92,20 @@ fun SettingsScreen(
     var confirmDeleteAll by remember { mutableStateOf(false) }
     var deleteError by remember { mutableStateOf<String?>(null) }
 
-    // Mutable settings state (read once; writes go through AppSettings).
+    // Mutable settings state (read once; writes go through applyExportFormat/applySaveToPhotos).
     var saveToPhotos  by remember { mutableStateOf(settings.saveToPhotos) }
     var exportFormat  by remember { mutableStateOf(settings.exportFormat) }
 
-    LaunchedEffect(Unit) {
+    // One reload routine for both the initial load and the post-delete refresh.
+    suspend fun reloadStorageStats() {
         val (bytes, count) = withContext(Dispatchers.IO) {
             Pair(store.storageUsedBytes(), try { store.loadAll().size } catch (_: Exception) { 0 })
         }
         usedBytes  = bytes
         stackCount = count
     }
+
+    LaunchedEffect(Unit) { reloadStorageStats() }
 
     Scaffold(
         containerColor = Color(0xFF1C1C1E),
@@ -102,7 +131,7 @@ fun SettingsScreen(
                         checked = saveToPhotos,
                         onCheckedChange = { v ->
                             saveToPhotos = v
-                            settings.saveToPhotos = v
+                            applySaveToPhotos(settings, coordinator, v)
                         }
                     )
                 }
@@ -115,7 +144,7 @@ fun SettingsScreen(
                         selected = exportFormat == ImageEncoder.Format.JPEG,
                         onClick = {
                             exportFormat = ImageEncoder.Format.JPEG
-                            settings.exportFormat = ImageEncoder.Format.JPEG
+                            applyExportFormat(settings, coordinator, ImageEncoder.Format.JPEG)
                         }
                     )
                 }
@@ -129,7 +158,7 @@ fun SettingsScreen(
                         selected = exportFormat == ImageEncoder.Format.HEIC,
                         onClick = {
                             exportFormat = ImageEncoder.Format.HEIC
-                            settings.exportFormat = ImageEncoder.Format.HEIC
+                            applyExportFormat(settings, coordinator, ImageEncoder.Format.HEIC)
                         }
                     )
                 }
@@ -152,18 +181,19 @@ fun SettingsScreen(
                     )
                 }
             )
+            // Single clickable row (no duplicate TextButton — the row text itself acts).
+            val deleteEnabled = (stackCount ?: 0) > 0
             ListItem(
-                headlineContent = { Text("Delete All Stacks", color = Color.Red) },
+                headlineContent = {
+                    Text("Delete All Stacks", color = if (deleteEnabled) Color.Red else Color.Red.copy(alpha = 0.4f))
+                },
                 colors = ListItemDefaults.colors(containerColor = Color(0xFF2C2C2E)),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = deleteEnabled) { confirmDeleteAll = true },
                 trailingContent = null,
                 supportingContent = deleteError?.let { { Text(it, color = Color.Red, fontSize = 11.sp) } }
             )
-            TextButton(
-                onClick = { confirmDeleteAll = true },
-                enabled = (stackCount ?: 0) > 0,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            ) { Text("Delete All Stacks", color = Color.Red) }
 
             // ── This Device ──────────────────────────────────────────────────
             SectionHeader("This Device")
@@ -177,16 +207,14 @@ fun SettingsScreen(
                 colors = ListItemDefaults.colors(containerColor = Color(0xFF2C2C2E)),
                 trailingContent = { Text(versionString(context), color = Color.White.copy(alpha = 0.7f)) }
             )
+            // Single clickable row (no duplicate TextButton — the row text itself acts).
             ListItem(
                 headlineContent = { Text("Replay Introduction", color = Color(0xFF0A84FF)) },
                 colors = ListItemDefaults.colors(containerColor = Color(0xFF2C2C2E)),
-                modifier = Modifier.fillMaxWidth()
-                    .let { m -> m }
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onReplayOnboarding() }
             )
-            TextButton(
-                onClick = onReplayOnboarding,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            ) { Text("Replay Introduction") }
         }
     }
 
@@ -199,13 +227,7 @@ fun SettingsScreen(
                     confirmDeleteAll = false
                     val err = runCatching { store.deleteAll() }.exceptionOrNull()
                     deleteError = err?.message
-                    scope.launch {
-                        val (bytes, count) = withContext(Dispatchers.IO) {
-                            Pair(store.storageUsedBytes(), try { store.loadAll().size } catch (_: Exception) { 0 })
-                        }
-                        usedBytes  = bytes
-                        stackCount = count
-                    }
+                    scope.launch { reloadStorageStats() }
                 }) { Text("Delete All", color = Color.Red) }
             },
             dismissButton = {

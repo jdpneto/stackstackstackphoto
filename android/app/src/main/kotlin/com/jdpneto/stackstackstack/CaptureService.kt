@@ -187,6 +187,13 @@ interface CaptureService {
 
     /** Whether the camera vends a Bayer RAW format the converter can decode. */
     val supportsRAWCapture: Boolean get() = true
+
+    /**
+     * Release camera/session resources. Called from [MainActivity.onDestroy] so the camera is
+     * never leaked when the activity is torn down. Default no-op (fakes have nothing to
+     * release); [Camera2CaptureService] overrides to close its device/session/readers.
+     */
+    fun close() { /* no-op for fakes */ }
 }
 
 /**

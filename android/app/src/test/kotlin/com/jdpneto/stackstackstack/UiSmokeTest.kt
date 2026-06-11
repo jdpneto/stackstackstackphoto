@@ -16,6 +16,9 @@ import org.junit.Test
 import org.robolectric.annotation.Config
 import org.robolectric.RuntimeEnvironment
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.jdpneto.stackstackstack.ui.applyExportFormat
+import com.jdpneto.stackstackstack.ui.applySaveToPhotos
+import com.jdpneto.stackstackstack.ui.shouldShowOpenSettings
 import org.junit.runner.RunWith
 import java.io.File
 
@@ -62,11 +65,13 @@ class UiSmokeTest {
     // ---------------------------------------------------------------------------
 
     /**
-     * The app root mirrors settings to the coordinator (mirrors iOS .onReceive(settings.$exportFormat)).
-     * Verify that changing AppSettings propagates to CoordinatorUiState.
+     * SettingsScreen's write path ([applyExportFormat]/[applySaveToPhotos] — exactly what the
+     * radio button / switch onClick handlers call) must update the LIVE coordinator, not just
+     * SharedPreferences. Regression test for the dead app-root mirror wiring that only synced
+     * on restart. (Android stand-in for iOS .onReceive(settings.$exportFormat))
      */
     @Test
-    fun `settings mirroring — format and saveToPhotos propagate to coordinator`() = runTest {
+    fun `settings screen write path — format and saveToPhotos reach the live coordinator`() = runTest {
         val testDispatcher = StandardTestDispatcher(testScheduler)
         val prefs = makePrefs()
         val settings = AppSettings(prefs)
@@ -81,18 +86,46 @@ class UiSmokeTest {
         // Default should be JPEG.
         assertEquals(ImageEncoder.Format.JPEG, coordinator.exportFormat)
 
-        // Simulate app-root LaunchedEffect sync: settings changes → coordinator.
-        settings.exportFormat = ImageEncoder.Format.HEIC
-        coordinator.exportFormat = settings.exportFormat
+        // The screen's format write path: persisted AND live on the coordinator.
+        applyExportFormat(settings, coordinator, ImageEncoder.Format.HEIC)
+        assertEquals(ImageEncoder.Format.HEIC, settings.exportFormat)
         assertEquals(ImageEncoder.Format.HEIC, coordinator.exportFormat)
         assertEquals(ImageEncoder.Format.HEIC, coordinator.uiState.value.exportFormat)
+        applyExportFormat(settings, coordinator, ImageEncoder.Format.JPEG)
+        assertEquals(ImageEncoder.Format.JPEG, coordinator.uiState.value.exportFormat)
 
-        // saveToPhotos
+        // The screen's saveToPhotos write path.
         assertFalse(coordinator.saveToPhotosEnabled)
-        settings.saveToPhotos = true
-        coordinator.saveToPhotosEnabled = settings.saveToPhotos
+        applySaveToPhotos(settings, coordinator, true)
+        assertTrue(settings.saveToPhotos)
         assertTrue(coordinator.saveToPhotosEnabled)
         assertTrue(coordinator.uiState.value.saveToPhotosEnabled)
+    }
+
+    // ---------------------------------------------------------------------------
+    // Onboarding camera-page permission tri-state
+    // ---------------------------------------------------------------------------
+
+    /**
+     * `checkSelfPermission == DENIED` is true on a FRESH INSTALL too — the "Open Settings"
+     * deep-link must only replace the "Enable Camera" runtime prompt after the prompt has
+     * actually been shown and denied (iOS `.denied` vs `.notDetermined` semantics).
+     */
+    @Test
+    fun `onboarding camera tri-state — fresh install prompts, only a real denial deep-links`() {
+        // Never asked (fresh install): always show "Enable Camera", granted or not.
+        assertFalse(shouldShowOpenSettings(requestedBefore = false, permissionGranted = false))
+        assertFalse(shouldShowOpenSettings(requestedBefore = false, permissionGranted = true))
+        // Asked and granted: no deep-link.
+        assertFalse(shouldShowOpenSettings(requestedBefore = true, permissionGranted = true))
+        // Asked and (still) denied — the one real-denial case: deep-link to Settings.
+        assertTrue(shouldShowOpenSettings(requestedBefore = true, permissionGranted = false))
+
+        // The "requested before" flag round-trips through AppSettings (set by the launcher callback).
+        val settings = AppSettings(makePrefs())
+        assertFalse("fresh install: never requested", settings.cameraPermissionRequested)
+        settings.cameraPermissionRequested = true
+        assertTrue(settings.cameraPermissionRequested)
     }
 
     // ---------------------------------------------------------------------------
