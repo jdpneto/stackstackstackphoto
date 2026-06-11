@@ -425,6 +425,8 @@ Look-tagged thumbnail grid; tap → result + metadata + edit/share/export/delete
 
 ## 18. Testing strategy
 
+> **Status (2026-06-11, feat/golden-corpus):** SSIM and ΔE76 metrics implemented (`Metrics.ssim`, `Metrics.meanDeltaE`). `GoldenCorpusTests` pins every look (noiseReduction / smoothMotion / lightTrails / lowLightBoost / depth) against committed reference PNGs in `Tests/StackEngineCoreTests/Resources/golden/` using PSNR ≥ 45 dB / SSIM ≥ 0.98 / ΔE ≤ 1.0 tolerances — the Android cross-platform contract. Corpus is Tier-1 synthetic (deterministic 96×64 Bayer bursts + focus brackets, seeded LCG). Regeneration: `SSS_REGENERATE_GOLDENS=1 swift test --filter GoldenCorpusTests`. Still open: Tier-2 real-bracket corpus, perf/thermal benchmarks, field scene suite, CIEDE2000 upgrade.
+
 - **Unit tests** per module: alignment transforms, demosaic (with embedded numeric reference values on a synthetic Bayer tile), each reducer, color transforms.
 - **Golden-image cross-platform corpus (the divergence guardrail):** shared RAW input sequences → run each platform's full pipeline → compare to reference outputs within per-metric tolerance:
   - **PSNR** ≥ threshold, **SSIM** ≥ threshold, mean **ΔE** ≤ threshold (exact values pinned in the spec/corpus).
