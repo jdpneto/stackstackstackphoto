@@ -101,6 +101,53 @@ internal fun binDemosaic(lin: FloatArray, w: Int, h: Int, pattern: CFAPattern): 
     return out
 }
 
+/**
+ * FUSED half-resolution develop: linearize each raw mosaic site INLINE per 2×2 quad and combine
+ * directly into one output RGB pixel, so the full-resolution linearized float plane is NEVER
+ * materialized. The per-site arithmetic is IDENTICAL to [linearizeAndBalance] followed by
+ * [binDemosaic] — same ops, same order — the only difference is that the intermediate full-size
+ * FloatArray is eliminated (per-frame transient drops ~50 MB → ~0 on a 12 MP sensor).
+ *
+ * OOM rationale (Fix 1b): with N parallel develop workers each holding a full-res float plane
+ * the default 256 MB Java heap is exhausted. With the fused path only the ~9 MB binned outputs
+ * accumulate, keeping total parallel transients within the largeHeap budget.
+ */
+internal fun fusedBinDemosaic(f: RawSensorFrame): PixelImage {
+    val w = f.width; val h = f.height
+    val ow = w / 2; val oh = h / 2
+    val out = PixelImage(ow, oh)
+    for (oy in 0 until oh) {
+        val y0 = 2 * oy
+        for (ox in 0 until ow) {
+            val x0 = 2 * ox
+            var r = 0f; var g = 0f; var b = 0f; var gn = 0f
+            for (dy in 0 until 2) {
+                for (dx in 0 until 2) {
+                    val rawIdx = (y0 + dy) * w + (x0 + dx)
+                    val raw = f.mosaic[rawIdx].toInt() and 0xFFFF
+                    // Inline linearizeSample (same logic as the standalone function).
+                    val denom = f.whiteLevel - f.blackLevel
+                    val lin = if (denom <= 0f) 0f else maxOf((raw.toFloat() - f.blackLevel) / denom, 0f)
+                    // Inline white-balance gain (same logic as linearizeAndBalance).
+                    val cx = x0 + dx; val cy = y0 + dy
+                    val v = lin * when (cfaColor(f.cfa, cx, cy)) {
+                        CFAColor.RED   -> f.wbGains.x
+                        CFAColor.GREEN -> f.wbGains.y
+                        CFAColor.BLUE  -> f.wbGains.z
+                    }
+                    when (cfaColor(f.cfa, cx, cy)) {
+                        CFAColor.RED   -> r = v
+                        CFAColor.GREEN -> { g += v; gn++ }
+                        CFAColor.BLUE  -> b = v
+                    }
+                }
+            }
+            out[ox, oy] = Vec3(r, if (gn > 0f) g / gn else g, b)
+        }
+    }
+    return out
+}
+
 /** Multiply a column-major 3×3 matrix (9 floats) by a Vec3. */
 private fun mat3MulVec3(m: FloatArray, v: Vec3): Vec3 {
     // m is column-major: [c0x,c0y,c0z, c1x,c1y,c1z, c2x,c2y,c2z]
@@ -128,9 +175,12 @@ object ColorPipeline {
     /**
      * Fast half-resolution develop (2×2 binning) — same pipeline, cheap demosaic. Used for the
      * managed on-device path (the full-res output is downscaled anyway).
+     *
+     * Uses [fusedBinDemosaic] so the full-resolution linearized float plane is NEVER materialized
+     * (Fix 1b: eliminates ~50 MB per-frame transient, preventing OOM on Android).
      */
     fun processBinned(frame: RawSensorFrame): PixelImage =
-        develop(frame, binDemosaic(linearizeAndBalance(frame), frame.width, frame.height, frame.cfa))
+        develop(frame, fusedBinDemosaic(frame))
 
     private fun develop(frame: RawSensorFrame, demosaiced: PixelImage): PixelImage {
         // demosaiced is a fresh image owned by this call — mutate in place, no copy needed.

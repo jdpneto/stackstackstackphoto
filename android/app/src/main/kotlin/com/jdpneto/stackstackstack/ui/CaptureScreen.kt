@@ -1,8 +1,12 @@
 package com.jdpneto.stackstackstack.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -50,9 +54,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import com.jdpneto.stackengine.StackMode
 import com.jdpneto.stackstackstack.Camera2CaptureService
 import com.jdpneto.stackstackstack.usesSteadinessGate
@@ -100,6 +106,26 @@ fun CaptureScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
+    // ── Lazy camera permission (Fix 2) ───────────────────────────────────────
+    // Mirror iOS: when the capture screen becomes active and permission is missing, request it
+    // once; until granted show the black preview + "Camera access is off…" status line.
+    var cameraGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> cameraGranted = granted }
+    // Request once on first composition if not already granted; the onboarding page's request
+    // stays as is — this guard only fires in the main-tab capture screen.
+    LaunchedEffect(Unit) {
+        if (!cameraGranted) {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
     // The result JPEG decoded to a bitmap — decoded once per new result (no disk read).
     var resultBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     LaunchedEffect(uiState.lastResultJPEG) {
@@ -126,6 +152,7 @@ fun CaptureScreen(
         // ── Live preview ──────────────────────────────────────────────────────
         CameraPreview(
             coordinator = coordinator,
+            cameraGranted = cameraGranted,
             tapToFocusEnabled = uiState.let { !it.isCapturing && !it.pro.hasManualFocusOrExposure },
             onFocusTap = { x, y, lock ->
                 coordinator.focusAndExpose(x, y, lock)
@@ -176,9 +203,15 @@ fun CaptureScreen(
         }
 
         // ── Bottom control stack ──────────────────────────────────────────────
+        // Fix 4: align the controls block to BottomCenter of the parent Box so it stays pinned
+        // to the bottom in BOTH portrait and landscape. The iOS equivalent is a Spacer() that
+        // pushes the controls block to the end of the VStack. Using Alignment.BottomCenter on
+        // the Column's Box alignment is more robust than a full-size Column with Arrangement.Bottom
+        // (which floats mid-screen in landscape because the content is shorter than the view height).
         Column(
             modifier = Modifier
-                .fillMaxSize()
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
                 .padding(bottom = 40.dp),
             verticalArrangement = Arrangement.Bottom,
             horizontalAlignment = Alignment.CenterHorizontally
@@ -225,7 +258,7 @@ fun CaptureScreen(
             ProPanel(uiState, coordinator, showPro, onToggle = { showPro = !showPro })
 
             // Status label.
-            StatusLabel(uiState)
+            StatusLabel(uiState, cameraGranted)
 
             // Cancel-processing button.
             if (uiState.processingCount > 0) {
@@ -255,15 +288,27 @@ fun CaptureScreen(
  * [Camera2CaptureService.setPreviewSurface] before [StackCaptureCoordinator.startPreview] runs.
  * [FakeCaptureService] ignores [setPreviewSurface] and returns null from [startPreview]
  * (the black box is the natural result). Mirrors the iOS [CameraPreviewView] lifecycle.
+ *
+ * [cameraGranted]: when false the surface is created but [startPreview] is NOT called (Fix 2).
+ * Once [cameraGranted] flips to true the [LaunchedEffect] restarts and calls [startPreview].
  */
 @Composable
 private fun CameraPreview(
     coordinator: StackCaptureCoordinator,
+    cameraGranted: Boolean,
     tapToFocusEnabled: Boolean,
     onFocusTap: (x: Float, y: Float, lock: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    // Start (or restart) preview whenever permission is granted. surfaceReady tracks whether the
+    // SurfaceHolder.Callback has fired — we need BOTH the surface and the permission.
+    var surfaceReady by remember { mutableStateOf(false) }
+    LaunchedEffect(cameraGranted, surfaceReady) {
+        if (cameraGranted && surfaceReady) {
+            coordinator.startPreview()
+        }
+    }
     AndroidView(
         factory = { ctx ->
             SurfaceView(ctx).also { sv ->
@@ -272,10 +317,14 @@ private fun CameraPreview(
                         // Provide the surface to the real service before startPreview runs.
                         (coordinator.captureService as? Camera2CaptureService)
                             ?.setPreviewSurface(holder.surface)
-                        scope.launch { coordinator.startPreview() }
+                        // Signal readiness; the LaunchedEffect above will call startPreview if
+                        // permission is already granted (or once it becomes granted).
+                        surfaceReady = true
                     }
                     override fun surfaceChanged(holder: SurfaceHolder, fmt: Int, w: Int, h: Int) {}
-                    override fun surfaceDestroyed(holder: SurfaceHolder) {}
+                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        surfaceReady = false
+                    }
                 })
             }
         },
@@ -574,7 +623,9 @@ private fun ProPanel(
         TextButton(
             onClick = onToggle,
             enabled = !busy,
-            modifier = Modifier.testTag("pro-toggle")
+            modifier = Modifier
+                .testTag("pro-toggle")
+                .semantics { contentDescription = "Pro controls toggle" }
         ) {
             Text(if (showPro) "Pro ▴" else "Pro ▾", color = Color.White, fontSize = 11.sp)
         }
@@ -712,10 +763,13 @@ private fun OptControl(
 /**
  * Composing Saved✓/notes/errors into one status line. Mirrors iOS [statusLabel].
  * (spec 2026-06-11 §2)
+ *
+ * [cameraGranted]: when false shows the iOS-parity "Camera access is off…" denial copy (Fix 2).
  */
 @Composable
-private fun StatusLabel(state: CoordinatorUiState) {
+private fun StatusLabel(state: CoordinatorUiState, cameraGranted: Boolean = true) {
     val text = when {
+        !cameraGranted -> "Camera access is off — tap Allow in the system prompt to enable it"
         state.isCapturing -> "Capturing…"
         state.processingCount > 0 ->
             if (state.processingCount > 1)
@@ -736,7 +790,7 @@ private fun StatusLabel(state: CoordinatorUiState) {
         modifier = Modifier
             .padding(horizontal = 16.dp)
             .fillMaxWidth(),
-        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        textAlign = TextAlign.Center
     )
 }
 
@@ -745,15 +799,17 @@ private fun StatusLabel(state: CoordinatorUiState) {
 // ---------------------------------------------------------------------------
 
 /**
- * Classic iOS-style shutter circle. Disabled while [busy]. Test-tagged "shutter".
- * Mirrors iOS [shutterButton].
+ * Classic iOS-style shutter circle. Disabled while [busy].
+ *
+ * Fix 3: testTag and semantics are placed on the Button (the clickable node) — NOT on the
+ * outer Box (a non-clickable container). Compose merges child semantics into the nearest
+ * clickable ancestor, so a tag on a non-clickable parent is dropped from the a11y tree.
+ * Putting them directly on the Button guarantees the node appears in uiautomator dumps.
  */
 @Composable
 private fun ShutterButton(busy: Boolean, onShoot: () -> Unit) {
     Box(
-        modifier = Modifier
-            .size(72.dp)
-            .testTag("shutter"),
+        modifier = Modifier.size(72.dp),
         contentAlignment = Alignment.Center
     ) {
         Button(
@@ -764,7 +820,10 @@ private fun ShutterButton(busy: Boolean, onShoot: () -> Unit) {
                 containerColor = Color.White,
                 disabledContainerColor = Color.White.copy(alpha = 0.4f)
             ),
-            modifier = Modifier.size(72.dp)
+            modifier = Modifier
+                .size(72.dp)
+                .testTag("shutter")
+                .semantics { contentDescription = "Shutter" }
         ) { /* no label; the circle IS the button */ }
     }
 }

@@ -12,11 +12,16 @@
     <!-- Battery monitoring for CaptureEnvironment. -->
     <uses-permission android:name="android.permission.BATTERY_STATS" />
 
+    <!--
+        CPU stacking engine: N working-resolution float frames live at once — the default 256 MB
+        heap cannot hold a burst. largeHeap lifts the ceiling to ~512 MB on most devices.
+    -->
     <application
         android:label="@string/app_name"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:largeHeap="true">
 
         <activity
             android:name=".MainActivity"
