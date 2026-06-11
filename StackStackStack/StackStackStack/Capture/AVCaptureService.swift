@@ -4,7 +4,6 @@ import StackEngineCore
 enum CaptureError: LocalizedError {
     case permissionDenied
     case noDevice
-    case noRawFormat
     case noFramesProduced
     case busy
 
@@ -12,7 +11,6 @@ enum CaptureError: LocalizedError {
         switch self {
         case .permissionDenied: return "Camera access is off. Enable it in Settings ▸ Privacy ▸ Camera."
         case .noDevice:         return "No camera is available on this device."
-        case .noRawFormat:      return "This device's camera doesn't support RAW capture."
         case .noFramesProduced: return "Couldn't read the captured frames. Please try again."
         case .busy:             return "A capture is already in progress."
         }
@@ -39,9 +37,11 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
 
     // Touched only on stateQueue.
     private var pending: [RawSensorFrame] = []
+    private var pendingDeveloped: [PixelImage] = []   // fallback path: HEIC-decoded linear frames
+    private var fallbackHEIC = false                  // true when no Bayer RAW format is available
     private var remaining = 0                   // frames still to capture, including the in-flight one
     private var outstanding = 0                 // RAW→frame conversions still running off the capture path
-    private var continuation: CheckedContinuation<[RawSensorFrame], Error>?
+    private var continuation: CheckedContinuation<CapturedBurst, Error>?
     private var generation = 0                  // bumps per burst; stale captures/timeouts are ignored
     private var currentID: Int64?               // settings.uniqueID of the in-flight capture (nil between frames)
     private var rawType: OSType = 0             // Bayer RAW format used to build each frame's settings
@@ -57,6 +57,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private var sweepPositions: [Float] = []     // Depth: per-frame lens positions; empty = no sweep
     private var manualLensSupported = true       // probed at configure; optimistic until then
     private var rawSupported = true              // probed at configure; optimistic until then
+    private var hevcSupported = false            // probed at configure on sessionQueue; read on stateQueue
     // Touched only on sessionQueue.
     private var configured = false
     // Computed once at configure (sessionQueue), read when building each capture's settings. The
@@ -65,7 +66,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private var cappedPhotoDimensions: CMVideoDimensions?
 
     func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
-                      onProgress: (@Sendable (Int) -> Void)?) async throws -> [RawSensorFrame] {
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> CapturedBurst {
         try await ensureAuthorized()
         try await ensureConfigured()
         try await lockExposureAndFocus(recipe: recipe)   // waits for manual exposure/focus to settle
@@ -80,20 +81,20 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         // end the burst with the frames gathered so far, instead of hanging.
         let frameTimeout = max(recipe.manualShutterSeconds ?? 0, 1.0) * 3 + 4.0
 
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[RawSensorFrame], Error>) in
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CapturedBurst, Error>) in
             self.stateQueue.async {
                 guard self.continuation == nil else { cont.resume(throwing: CaptureError.busy); return }
                 guard frameCount > 0 else { cont.resume(throwing: CaptureError.noFramesProduced); return }
                 let rawTypes = self.output.availableRawPhotoPixelFormatTypes
-                // Require a Bayer format the single-plane reader can decode. NOT `?? rawTypes.first`:
+                // Find a Bayer format the single-plane reader can decode. NOT `?? rawTypes.first`:
                 // feeding a ProRAW/other format to AVCapturePhotoSettings(rawPixelFormatType:) can
                 // raise an uncatchable NSException, and the converter couldn't read it anyway.
-                guard let rawType = rawTypes.first(where: { RawFrameConverter.isSupportedBayerFormat($0) }) else {
-                    cont.resume(throwing: CaptureError.noRawFormat); return
-                }
+                // When no Bayer format exists, fall back to HEIC capture (non-RAW "Standard quality").
+                let bayerType = rawTypes.first(where: { RawFrameConverter.isSupportedBayerFormat($0) })
 
                 self.generation += 1
                 self.pending = []
+                self.pendingDeveloped = []
                 self.outstanding = 0
                 self.continuation = cont
                 self.remaining = frameCount
@@ -103,13 +104,20 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 self.sweepPositions = recipe.focusSweep?.positions ?? []
                 self.gateAttempts = 0
                 self.currentID = nil
-                self.rawType = rawType
+                self.rawType = bayerType ?? 0
+                self.fallbackHEIC = bayerType == nil
                 self.pacingInterval = pacing
                 self.perFrameTimeout = frameTimeout
                 self.startNextFrameLocked(gen: self.generation)
             }
         }
     }
+
+    /// Long-edge pixel cap for HEIC fallback decode. Standard-quality ceiling (bible §5.3): 1500 px
+    /// keeps a 30-frame fallback burst ≈ 0.8 GB instead of ≈ 2 GB at 2400 px — the fallback serves
+    /// exactly the hardware that can least afford the difference. Independent of the RAW path's
+    /// managedWorkingResolution by design.
+    private static let fallbackDecodeLongEdge = 1500
 
     /// Issue the next capture in the burst, or finish if none remain. Must run on `stateQueue`.
     /// In-flight RAW requests are bounded to exactly one — the still-image (Iris) pipeline bails
@@ -140,7 +148,19 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         }
         self.gateAttempts = 0   // reset for the next frame
 
-        let settings = AVCapturePhotoSettings(rawPixelFormatType: self.rawType)
+        // Settings: Bayer RAW on supported hardware; HEIC/JPEG on the non-RAW fallback path.
+        // NOT `?? rawTypes.first`: feeding an unsupported format to rawPixelFormatType raises an
+        // uncatchable NSException; the fallback uses HEVC where the hardware lists it (probed once
+        // in ensureConfigured on sessionQueue into hevcSupported), otherwise default JPEG settings —
+        // never construct settings with a codec the output doesn't advertise. (spec 2026-06-11 §3, Fix 3)
+        let settings: AVCapturePhotoSettings
+        if self.fallbackHEIC {
+            settings = self.hevcSupported
+                ? AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+                : AVCapturePhotoSettings()
+        } else {
+            settings = AVCapturePhotoSettings(rawPixelFormatType: self.rawType)
+        }
         settings.photoQualityPrioritization = .speed   // minimize per-frame capture latency
         let id = settings.uniqueID
         self.currentID = id
@@ -269,11 +289,16 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                     self.stateQueue.async { self.manualLensSupported = lensSupported }
                     let rawOK = self.output.availableRawPhotoPixelFormatTypes
                         .contains(where: { RawFrameConverter.isSupportedBayerFormat($0) })
-                    self.stateQueue.async { self.rawSupported = rawOK }
-                    // Bayer RAW must be vended by the configured output, else capture can't produce frames.
-                    guard !self.output.availableRawPhotoPixelFormatTypes.isEmpty else {
-                        throw CaptureError.noRawFormat
+                    // Probe HEVC availability once here on sessionQueue (the only queue where output
+                    // configuration is safe to read). Constructing AVCapturePhotoSettings with a codec
+                    // not in availablePhotoCodecTypes raises an uncatchable NSException — guard it here
+                    // rather than at each frame's settings build. (Fix 3)
+                    let hevcOK = self.output.availablePhotoCodecTypes.contains(.hevc)
+                    self.stateQueue.async {
+                        self.rawSupported = rawOK
+                        self.hevcSupported = hevcOK
                     }
+                    // No RAW capability is NOT a configure failure — the burst falls back to HEIC ("Standard quality") and the rawSupported probe reports it.
                     cont.resume()
                 } catch {
                     cont.resume(throwing: error)
@@ -390,10 +415,17 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         isSteadyCheck = { true }    // release any captured coordinator/MotionSteadiness reference
         onProgress = nil            // release any captured coordinator reference
         sweepPositions = []
-        let frames = pending
-        pending = []
-        if frames.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
-        else { cont.resume(returning: frames) }
+        if fallbackHEIC {
+            let imgs = pendingDeveloped
+            pendingDeveloped = []
+            if imgs.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
+            else { cont.resume(returning: .developed(imgs)) }
+        } else {
+            let frames = pending
+            pending = []
+            if frames.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
+            else { cont.resume(returning: .raw(frames)) }
+        }
     }
 }
 
@@ -407,15 +439,36 @@ extension AVCaptureService: AVCapturePhotoCaptureDelegate {
         stateQueue.async {
             guard self.continuation != nil, id == self.currentID else { return }   // stale/superseded
             let gen = self.generation
+            let isFallback = self.fallbackHEIC
             self.outstanding += 1
             self.processingQueue.async {
-                let frame = error == nil ? RawFrameConverter.make(from: photo) : nil
-                self.stateQueue.async {
-                    guard self.continuation != nil, self.generation == gen else { return }   // burst ended/superseded
-                    if let frame { self.pending.append(frame) }
-                    if frame != nil { self.onProgress?(self.pending.count) }
-                    self.outstanding -= 1
-                    self.maybeFinishLocked()
+                if isFallback {
+                    // Non-RAW fallback: decode HEIC to sRGB RGBA8 at working resolution, then
+                    // linearise to PixelImage. A failed decode skips the frame (same as a failed
+                    // RAW conversion). (spec 2026-06-11 §3 / §4)
+                    let decoded: PixelImage? = {
+                        guard error == nil,
+                              let data = photo.fileDataRepresentation(),
+                              let (rgba, w, h) = ImageDecoder.rgba8(from: data, maxPixel: Self.fallbackDecodeLongEdge)
+                        else { return nil }
+                        return OutputTransform.decodeSRGB8(rgba, width: w, height: h)
+                    }()
+                    self.stateQueue.async {
+                        guard self.continuation != nil, self.generation == gen else { return }
+                        if let img = decoded { self.pendingDeveloped.append(img) }
+                        if decoded != nil { self.onProgress?(self.pendingDeveloped.count) }
+                        self.outstanding -= 1
+                        self.maybeFinishLocked()
+                    }
+                } else {
+                    let frame = error == nil ? RawFrameConverter.make(from: photo) : nil
+                    self.stateQueue.async {
+                        guard self.continuation != nil, self.generation == gen else { return }   // burst ended/superseded
+                        if let frame { self.pending.append(frame) }
+                        if frame != nil { self.onProgress?(self.pending.count) }
+                        self.outstanding -= 1
+                        self.maybeFinishLocked()
+                    }
                 }
             }
         }

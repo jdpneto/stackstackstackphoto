@@ -362,9 +362,106 @@ final class CoordinatorTests: XCTestCase {
         let rec = try XCTUnwrap(store.loadAll().first)
         XCTAssertNil(store.referenceData(for: rec.id), "no blend semantics for focus stacks")
     }
+
+    // MARK: - Task 1: CaptureEnvironment policy
+
+    @MainActor
+    func testCriticalThermalBlocksTheShot() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.environment = CaptureEnvironment(thermalState: { .critical }, batteryLevel: { 1 },
+                                               batteryCharging: { false }, freeDiskBytes: { .max })
+        await coord.shoot()
+        XCTAssertEqual(coord.lastError, "Too hot — let the phone cool down.")
+        await coord.awaitProcessing()
+        XCTAssertEqual(try store.loadAll().count, 0)
+    }
+
+    @MainActor
+    func testSeriousThermalHalvesTheBurst() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.environment = CaptureEnvironment(thermalState: { .serious }, batteryLevel: { 1 },
+                                               batteryCharging: { false }, freeDiskBytes: { .max })
+        coord.mode = .noiseReduction                      // base recipe = 8 frames
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertEqual(try store.loadAll().first?.frameCount, 4, "serious thermal halves the burst")
+        XCTAssertNotNil(coord.environmentNote)
+    }
+
+    @MainActor
+    func testLowStorageBlocksTheShot() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.environment = CaptureEnvironment(thermalState: { .nominal }, batteryLevel: { 1 },
+                                               batteryCharging: { false }, freeDiskBytes: { 50_000_000 })
+        await coord.shoot()
+        XCTAssertEqual(coord.lastError, "Not enough storage to capture.")
+        await coord.awaitProcessing()
+        XCTAssertEqual(try store.loadAll().count, 0)
+    }
+
+    @MainActor
+    func testLowBatteryWarnsButShoots() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.environment = CaptureEnvironment(thermalState: { .nominal }, batteryLevel: { 0.05 },
+                                               batteryCharging: { false }, freeDiskBytes: { .max })
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertEqual(try store.loadAll().count, 1, "low battery never blocks")
+        XCTAssertEqual(coord.environmentNote, "Low battery")
+    }
+
+    // MARK: - Task 2 (CapturedBurst / non-RAW fallback) tests
+
+    @MainActor
+    func testDevelopedBurstSavesForStaticAndLongExposure() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = LibraryStore(rootDirectory: dir)
+        let coord = StackCaptureCoordinator(capture: DevelopedFake(width: 16, height: 16, count: 20), store: store)
+        for mode in [StackMode.noiseReduction, .smoothMotion] {
+            coord.mode = mode
+            await coord.shoot()
+            await coord.awaitProcessing()
+            XCTAssertNil(coord.lastError, "\(mode)")
+        }
+        XCTAssertEqual(try store.loadAll().count, 2)
+        // Blendable look on the fallback path still stores a reference.
+        let smooth = try XCTUnwrap(store.loadAll().first { $0.mode == "smoothMotion" })
+        XCTAssertNotNil(store.referenceData(for: smooth.id))
+    }
+
+    @MainActor
+    func testDevelopedBurstDepthSaves() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = LibraryStore(rootDirectory: dir)
+        let coord = StackCaptureCoordinator(capture: DevelopedFake(width: 24, height: 16, count: 10), store: store)
+        coord.mode = .depthOfField
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNil(coord.lastError)
+        XCTAssertEqual(try store.loadAll().first?.mode, "depthOfField")
+    }
 }
 
 // MARK: - Helpers
+
+/// Fallback-path fake: returns already-developed frames, as a non-RAW device's HEIC path would.
+private struct DevelopedFake: CaptureService {
+    let width: Int, height: Int, count: Int
+    func startPreview() async -> CALayer? { nil }
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> CapturedBurst {
+        await Task.yield()
+        let n = min(recipe.frameCount, count)
+        let imgs = (0..<n).map { k -> PixelImage in
+            var img = PixelImage(width: width, height: height, fill: SIMD3<Float>(0.4, 0.4, 0.4))
+            img[k % width, 0] = SIMD3<Float>(0.9, 0.9, 0.9)   // per-frame variation
+            onProgress?(k + 1)
+            return img
+        }
+        return .developed(imgs)
+    }
+    var supportsRAWCapture: Bool { false }
+}
 
 private actor ExportLog {
     private(set) var count = 0

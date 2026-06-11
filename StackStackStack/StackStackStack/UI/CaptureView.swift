@@ -187,7 +187,9 @@ struct CaptureView: View {
             } else if coordinator.lastResultJPEG != nil {
                 Text(coordinator.photosExportNote.map { "Saved ✓ · \($0)" } ?? "Saved ✓")
             } else {
-                Text("Ready")
+                // Show any system-condition advisory (thermal/battery) alongside "Ready".
+                // (spec 2026-06-11 §2: note visible on the Ready state)
+                Text(coordinator.environmentNote.map { "Ready · \($0)" } ?? "Ready")
             }
         }.foregroundColor(.white).padding(.horizontal)
     }
@@ -224,6 +226,12 @@ struct CaptureView: View {
             }
             if !coordinator.supportsDepth {
                 Text("Depth needs manual-focus hardware this camera doesn't have")
+                    .font(.caption2).foregroundColor(.white.opacity(0.7))
+            }
+            if !coordinator.supportsRAW {
+                // Non-RAW hardware: HEIC frames are decoded at working resolution and routed through
+                // the same align+stack pipeline. Quality is good but not sensor-native. (spec 2026-06-11 §3)
+                Text("Standard quality — RAW not available on this camera")
                     .font(.caption2).foregroundColor(.white.opacity(0.7))
             }
         }

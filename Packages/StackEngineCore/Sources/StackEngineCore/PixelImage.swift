@@ -1,7 +1,9 @@
 import simd
 
 /// A linear-light RGB image. Pixels are row-major; channels are scene-linear floats.
-public struct PixelImage: Equatable {
+/// `Sendable`: all stored properties are value types (Int, [SIMD3<Float>]) so the conformance is
+/// trivially safe; declared explicitly so CapturedBurst.developed([PixelImage]) can be Sendable.
+public struct PixelImage: Equatable, Sendable {
     public let width: Int
     public let height: Int
     public var pixels: [SIMD3<Float>]

@@ -1,6 +1,21 @@
 import StackEngineCore
 import QuartzCore
 
+/// What a burst produced: Bayer RAW frames (the quality path) or already-developed images (the
+/// non-RAW "Standard quality" fallback, decoded at working resolution; spec 2026-06-11 §3).
+enum CapturedBurst: Sendable {
+    case raw([RawSensorFrame])
+    case developed([PixelImage])
+
+    var count: Int {
+        switch self {
+        case .raw(let f): return f.count
+        case .developed(let i): return i.count
+        }
+    }
+    var isEmpty: Bool { count == 0 }
+}
+
 /// How a burst is captured for a given look (design §10.4), plus optional manual Pro overrides.
 /// Long-exposure looks capture more frames over a longer window (a continuous burst); the static
 /// looks use a short fast burst.
@@ -101,7 +116,7 @@ protocol CaptureService {
     /// is appended, with the running count (1…n). Callers that don't need these use the overloads
     /// below. (design 2026-06-07 §8)
     func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
-                      onProgress: (@Sendable (Int) -> Void)?) async throws -> [RawSensorFrame]
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> CapturedBurst
     /// Start the live preview session and return a layer showing it (nil if unavailable, e.g. the
     /// Simulator fake). Idempotent — safe to call each time the capture screen appears.
     func startPreview() async -> CALayer?
@@ -118,11 +133,11 @@ protocol CaptureService {
 
 extension CaptureService {
     /// Ungated capture (static looks, tests): always "steady", no progress callback.
-    func captureBurst(recipe: CaptureRecipe) async throws -> [RawSensorFrame] {
+    func captureBurst(recipe: CaptureRecipe) async throws -> CapturedBurst {
         try await captureBurst(recipe: recipe, isSteady: { true }, onProgress: nil)
     }
     /// Gated capture without a progress callback (long-exposure looks that don't need the counter).
-    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> [RawSensorFrame] {
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool) async throws -> CapturedBurst {
         try await captureBurst(recipe: recipe, isSteady: isSteady, onProgress: nil)
     }
 

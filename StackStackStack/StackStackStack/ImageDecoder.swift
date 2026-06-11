@@ -8,11 +8,18 @@ enum ImageDecoder {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let cg: CGImage?
         if let maxPixel {
+            // kCGImageSourceCreateThumbnailFromImageAlways upscales sources smaller than maxPixel;
+            // clamp so maxPixel is a ceiling, never a floor. If source properties are unreadable,
+            // fall back to the requested size (same behaviour as today). (Fix 4)
+            let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+            let srcW = props?[kCGImagePropertyPixelWidth] as? Int ?? maxPixel
+            let srcH = props?[kCGImagePropertyPixelHeight] as? Int ?? maxPixel
+            let target = min(maxPixel, max(srcW, srcH))
             // Downscaled decode for previews — avoids decoding a full-res frame per slider release.
             let opts: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+                kCGImageSourceThumbnailMaxPixelSize: target,
             ]
             cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
         } else {

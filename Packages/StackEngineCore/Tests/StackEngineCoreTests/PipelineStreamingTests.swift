@@ -68,6 +68,49 @@ final class PipelineStreamingTests: XCTestCase {
         XCTAssertEqual(trailed.pixels, imgs[0].pixels)
     }
 
+    // MARK: - reduceImagesStreamingWithReference (non-RAW fallback, Fix 1a / spec 2026-06-11 §3)
+
+    /// Three small developed frames with slight brightness variation so alignment actually has
+    /// something to lock onto; the spot shifts one pixel right per frame.
+    private func movingSpotFrames3() -> [PixelImage] { movingSpotFrames(3, w: 16, h: 16) }
+
+    func testReduceImagesStreamingWithReference_dimsMatchAndReferenceIsFrame0() throws {
+        let imgs = movingSpotFrames3()
+        let (result, reference) = try Pipeline.reduceImagesStreamingWithReference(imgs, mode: .smoothMotion)
+        XCTAssertEqual(result.width, imgs[0].width)
+        XCTAssertEqual(result.height, imgs[0].height)
+        // Reference must be pixel-identical to frame 0 (the anchor is returned directly, not re-developed).
+        XCTAssertEqual(reference.pixels.count, imgs[0].pixels.count)
+        for i in 0..<imgs[0].pixels.count {
+            XCTAssertEqual(reference.pixels[i].x, imgs[0].pixels[i].x, accuracy: 1e-6,
+                           "reference pixel \(i).x must equal frame 0")
+            XCTAssertEqual(reference.pixels[i].y, imgs[0].pixels[i].y, accuracy: 1e-6,
+                           "reference pixel \(i).y must equal frame 0")
+            XCTAssertEqual(reference.pixels[i].z, imgs[0].pixels[i].z, accuracy: 1e-6,
+                           "reference pixel \(i).z must equal frame 0")
+        }
+    }
+
+    func testReduceImagesStreamingWithReference_lightTrailsProducesResult() throws {
+        let imgs = movingSpotFrames3()
+        let (result, reference) = try Pipeline.reduceImagesStreamingWithReference(imgs, mode: .lightTrails)
+        XCTAssertEqual(result.width, imgs[0].width)
+        XCTAssertEqual(result.height, imgs[0].height)
+        XCTAssertEqual(reference.width, imgs[0].width)
+        XCTAssertTrue(result.pixels.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite })
+    }
+
+    func testReduceImagesStreamingWithReference_cancellationThrows() {
+        let imgs = movingSpotFrames(6, w: 16, h: 16)
+        var calls = 0
+        XCTAssertThrowsError(
+            try Pipeline.reduceImagesStreamingWithReference(imgs, mode: .smoothMotion,
+                                                            shouldCancel: { calls += 1; return calls > 1 })
+        ) { error in
+            XCTAssertTrue(error is CancellationError, "expected CancellationError, got \(error)")
+        }
+    }
+
     private func grayRaw(_ value: UInt16, w: Int = 64, h: Int = 64) -> RawSensorFrame {
         RawSensorFrame(width: w, height: h, mosaic: [UInt16](repeating: value, count: w * h),
                        blackLevel: 64, whiteLevel: 1024, cfa: .rggb,

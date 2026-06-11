@@ -419,6 +419,8 @@ Look-tagged thumbnail grid; tap → result + metadata + edit/share/export/delete
 | Storage full | pre-flight check | block capture with clear message. |
 | Low battery / thermal critical | system APIs | reduce session length / warn / abort. |
 
+> **Implementation status (2026-06-11).** Thermal throttle/abort, storage pre-flight, low-battery warning, and the no-RAW standard-quality fallback shipped (see 2026-06-11-capture-safeguards-design.md). Metering guidance (insufficient light / overexposure) remains open.
+
 ---
 
 ## 18. Testing strategy
