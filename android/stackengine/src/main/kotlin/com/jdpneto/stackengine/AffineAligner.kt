@@ -278,6 +278,8 @@ private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third:
  * brackets is a small, monotonic magnification change, and the steadiness gate bounds handheld
  * per-step motion — so a link estimate outside these is a spurious fit (a blur difference being
  * "explained" by warp) and must not be trusted with scale/rotation. (spec 2026-06-10 §4.2)
+ *
+ * All fields are `val` (immutable); use `copy(field = newValue)` to derive a variant.
  */
 data class ChainBounds(
     /** Max |scale − 1| per step. */

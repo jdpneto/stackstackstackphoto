@@ -47,6 +47,7 @@ object ImageEditor {
      * pivot → tone curve (shadows/highlights). Output clamped ≥ 0.
      */
     internal fun tonal(adj: ImageAdjustments, img: PixelImage): PixelImage {
+        // 2.0.pow(x) ≤1-ulp vs Apple exp2 — vanishes in .toFloat(); editor output isn't golden-pinned yet (app-layer follow-up).
         val expGain = 2.0.pow(adj.exposureEV.toDouble()).toFloat()       // UI constrains EV to ±2
         val contrastFactor = 1f + max(-0.9f, min(1f, adj.contrast))      // contrast = -1 must not flat-grey
         // tint is magenta(+)/green(-): positive tint REDUCES green.

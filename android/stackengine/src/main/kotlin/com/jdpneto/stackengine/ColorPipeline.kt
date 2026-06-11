@@ -133,8 +133,8 @@ object ColorPipeline {
         develop(frame, binDemosaic(linearizeAndBalance(frame), frame.width, frame.height, frame.cfa))
 
     private fun develop(frame: RawSensorFrame, demosaiced: PixelImage): PixelImage {
-        // PORTING TRAP: Swift `var out = img` is a value-type copy; Kotlin needs .copy().
-        val out = demosaiced.copy()
+        // demosaiced is a fresh image owned by this call — mutate in place, no copy needed.
+        val out = demosaiced
         val m = frame.colorMatrix
         val n = out.pixelCount
         for (i in 0 until n) {

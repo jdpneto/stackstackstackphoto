@@ -96,7 +96,8 @@ object Pipeline {
     /**
      * Align then apply the look's reducer. [workingResolution] (long-edge px, null = full) downscales
      * the developed frames before align/stack — the dominant lever for on-device speed + memory,
-     * since alignment and stacking cost scale with pixel count.
+     * since alignment and stacking cost scale with pixel count. Use [noiseReductionImages] for an
+     * explicit kappa (sigma-clipping threshold) rather than the fixed default.
      */
     fun reduceImages(
         imgs: List<PixelImage>, mode: StackMode, searchRange: Int = 8,

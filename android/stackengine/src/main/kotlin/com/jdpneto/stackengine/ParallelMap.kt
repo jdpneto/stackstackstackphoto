@@ -1,9 +1,15 @@
 package com.jdpneto.stackengine
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.runBlocking
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+
+// Engine-owned worker pool: parallelMap must be callable from ANY thread or coroutine context
+// without deadlock (a runBlocking(Dispatchers.Default) implementation deadlocks when callers
+// invoke the engine from Default-dispatcher coroutines — the Android app will). Slot-indexed
+// writes preserve order: result[i] = transform(items[i]).
+private val pool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors()) { r ->
+    Thread(r).also { it.isDaemon = true }
+}
 
 /**
  * Map [transform] over [items] across all available cores. Per-frame develop, luma, and alignment
@@ -18,14 +24,17 @@ import kotlinx.coroutines.runBlocking
  *
  * Engine API stays synchronous (returns `List<R>`) like the Swift port.
  */
+@Suppress("UNCHECKED_CAST")
 fun <T, R> parallelMap(items: List<T>, transform: (T) -> R): List<R> {
     val n = items.size
     if (n <= 1) return items.map(transform)
-    // Pre-allocate result slots; each coroutine writes into its own index (no overlap, no races).
-    return runBlocking(Dispatchers.Default) {
-        items.mapIndexed { i, t -> async { i to transform(t) } }
-            .awaitAll()
-            .sortedBy { it.first }   // restore input order
-            .map { it.second }
+    // Pre-allocate result slots; each task writes into its own index (no overlap, no races).
+    val results = arrayOfNulls<Any>(n)
+    val callables = items.mapIndexed { i, t -> java.util.concurrent.Callable { results[i] = transform(t) } }
+    try {
+        pool.invokeAll(callables).forEach { it.get() }
+    } catch (e: ExecutionException) {
+        throw e.cause ?: e
     }
+    return results.map { it as R }
 }
