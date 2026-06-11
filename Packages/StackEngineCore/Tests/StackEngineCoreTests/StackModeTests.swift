@@ -16,4 +16,13 @@ final class StackModeTests: XCTestCase {
         // Depth is a static fast-ish sweep (frame-count sliders, no duration window).
         XCTAssertFalse(StackMode.depthOfField.isLongExposure)
     }
+
+    func testSupportsBlendReference() {
+        // All looks support blend-reference except depthOfField (frames differ by focus, not time).
+        XCTAssertTrue(StackMode.noiseReduction.supportsBlendReference)
+        XCTAssertTrue(StackMode.smoothMotion.supportsBlendReference)
+        XCTAssertTrue(StackMode.lightTrails.supportsBlendReference)
+        XCTAssertTrue(StackMode.lowLightBoost.supportsBlendReference)
+        XCTAssertFalse(StackMode.depthOfField.supportsBlendReference)
+    }
 }

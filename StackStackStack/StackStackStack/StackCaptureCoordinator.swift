@@ -274,7 +274,7 @@ final class StackCaptureCoordinator: ObservableObject {
                                                encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) async throws -> (data: Data, reference: Data?, format: ImageEncoder.Format) {
         try await Task.detached(priority: .userInitiated) {
             let result: PixelImage
-            var referencePixels: PixelImage?   // the aligned anchor — nil for depth
+            var referencePixels: PixelImage?   // the aligned anchor — nil when !mode.supportsBlendReference
             if mode.isLongExposure {
                 // Streaming: one developed+aligned frame in flight at a time; cancellable between frames.
                 let (res, ref) = try Pipeline.reduceStreamingWithReference(frames, mode: mode,
@@ -282,9 +282,9 @@ final class StackCaptureCoordinator: ObservableObject {
                                                                            binnedDevelop: true, shouldCancel: shouldCancel)
                 result = res
                 referencePixels = ref
-            } else if mode == .depthOfField {
+            } else if !mode.supportsBlendReference {
                 // Depth: develop all brackets at the managed depth resolution, then focus-stack.
-                // No blend-strength reference — α is a long-exposure/noise concept. (spec 2026-06-11 §4)
+                // No blend-strength reference — frames differ by focus, not by time. (spec 2026-06-11 §4)
                 let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
                                                          workingResolution: depthWorkingResolution)
                 if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
@@ -312,13 +312,17 @@ final class StackCaptureCoordinator: ObservableObject {
             // aligned pixel-to-pixel in the final stored images. (spec 2026-06-11 §4)
             let orientedRef = referencePixels.map { ImageGeometry.rotated($0, quarterTurns: orientationQuarterTurns) }
             let rgba = OutputTransform.encodeSRGB8(oriented)
+            // Hoist the reference RGBA encode so it runs once and is shared by both the happy
+            // path and the HEIC-fallback branch — eliminates the duplicate work and textual
+            // duplication. (spec 2026-06-11 §6)
+            let refRGBA = orientedRef.map { OutputTransform.encodeSRGB8($0) }
             do {
                 let data = try encode(rgba, oriented.width, oriented.height, format, 0.95)
                 // Encode the reference in the SAME format the result ended up with; wrap in try? so a
                 // reference encode failure never loses the main result. (spec 2026-06-11 §6)
-                let refData = orientedRef.flatMap { ref -> Data? in
-                    let refRGBA = OutputTransform.encodeSRGB8(ref)
-                    return try? encode(refRGBA, ref.width, ref.height, format, 0.95)
+                let refData = refRGBA.flatMap { rBytes -> Data? in
+                    let ref = orientedRef!
+                    return try? encode(rBytes, ref.width, ref.height, format, 0.95)
                 }
                 return (data, refData, format)
             } catch where format == .heic {
@@ -326,9 +330,9 @@ final class StackCaptureCoordinator: ObservableObject {
                 // (develop+align+stack) is never re-run. Both result and reference fall back together
                 // so the pair always shares one format. (spec §8)
                 let data = try encode(rgba, oriented.width, oriented.height, .jpeg, 0.95)
-                let refData = orientedRef.flatMap { ref -> Data? in
-                    let refRGBA = OutputTransform.encodeSRGB8(ref)
-                    return try? encode(refRGBA, ref.width, ref.height, .jpeg, 0.95)
+                let refData = refRGBA.flatMap { rBytes -> Data? in
+                    let ref = orientedRef!
+                    return try? encode(rBytes, ref.width, ref.height, .jpeg, 0.95)
                 }
                 return (data, refData, .jpeg)
             }

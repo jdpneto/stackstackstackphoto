@@ -18,10 +18,11 @@ enum ResultRenderer {
         // Decode the reference at the same scale so dimensions match for the blend-strength lerp.
         // Dimension mismatch (e.g. a JPEG decode that chose a slightly different scale) is caught
         // defensively inside ImageEditor.apply and skips the blend rather than trapping.
-        let refLinear: PixelImage? = referenceJPEG.flatMap { refData in
+        // Skip the disk/decode work entirely when no blend is active.
+        let refLinear: PixelImage? = adjustments.hasBlend ? referenceJPEG.flatMap { refData in
             guard let (refRGBA, rw, rh) = ImageDecoder.rgba8(from: refData, maxPixel: maxPixel) else { return nil }
             return OutputTransform.decodeSRGB8(refRGBA, width: rw, height: rh)
-        }
+        } : nil
         let adjusted = ImageEditor.apply(adjustments, to: linear, reference: refLinear)
         let outRGBA = OutputTransform.encodeSRGB8(adjusted)
         // Use the ADJUSTED dimensions — crop changes them, so w/h from the decode are stale.

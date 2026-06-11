@@ -120,8 +120,10 @@ struct PhotoDetailView: View {
             let result: (ImageAdjustments, Data)? = await Task.detached(priority: .userInitiated) {
                 // originalData, referenceData, and adjustments are safe to read off the main thread (file I/O only).
                 guard let original = lib.originalData(for: id) else { return nil }
-                let ref = lib.referenceData(for: id)   // nil for depth + pre-this-PR records; blend persists
                 var adj = lib.adjustments(for: id)
+                // Skip the referenceData disk read when no blend is active — hasBlend false means
+                // the reference file is irrelevant to the render and reading it wastes I/O.
+                let ref = adj.hasBlend ? lib.referenceData(for: id) : nil
                 adj.quarterTurns += delta   // ImageAdjustments normalizes into 0…3 via its didSet
                 guard let rendered = ResultRenderer.render(originalJPEG: original, adjustments: adj, quality: 0.95,
                                                            format: fmt, referenceJPEG: ref)

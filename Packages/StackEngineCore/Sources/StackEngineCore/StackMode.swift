@@ -18,4 +18,8 @@ public enum StackMode: String, Sendable, Equatable, Hashable, CaseIterable {
         case .noiseReduction, .lowLightBoost, .depthOfField: return false
         }
     }
+
+    /// Looks whose result can be re-blended against the aligned reference (α look-strength).
+    /// Depth has no single-reference semantics — its frames differ by focus, not by time.
+    public var supportsBlendReference: Bool { self != .depthOfField }
 }

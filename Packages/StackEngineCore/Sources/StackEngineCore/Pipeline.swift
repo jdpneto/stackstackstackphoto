@@ -50,7 +50,19 @@ public enum Pipeline {
                                                  workingResolution: Int? = nil) -> (result: PixelImage, reference: PixelImage) {
         let (aligned, refIdx) = alignedStackWithRefIdx(downscale(imgs, maxEdge: workingResolution), searchRange: searchRange)
         let result = reduceAligned(aligned, mode: mode)
-        return (result, aligned[refIdx])
+        // The blend endpoints must share the look's exposure — α trades noise, not brightness.
+        // For lowLightBoost the result is a gain-boosted mean; scale the reference by the same gain
+        // so α=0 (reference) and α=1 (result) sit at the same perceptual brightness.
+        let rawRef = aligned[refIdx]
+        let reference: PixelImage
+        if mode == .lowLightBoost {
+            let gain = StackReducer.defaultLowLightGain
+            reference = PixelImage(width: rawRef.width, height: rawRef.height,
+                                   pixels: rawRef.pixels.map { $0 * gain })
+        } else {
+            reference = rawRef
+        }
+        return (result, reference)
     }
 
     /// Align then apply the look's reducer. `workingResolution` (long-edge px, nil = full) downscales

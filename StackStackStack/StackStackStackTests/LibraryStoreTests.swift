@@ -179,4 +179,21 @@ final class LibraryStoreTests: XCTestCase {
         store.reconcileOrphans()
         XCTAssertNotNil(store.referenceData(for: saved.id))
     }
+
+    func testStaleAlphaWithMissingReferenceNormalizesToOne() throws {
+        // Save WITHOUT a reference, then applyEdit with blendStrength 0.4 persisted.
+        // Re-reading adjustments must return blendStrength == 1 because there's no reference
+        // file to blend against — a stale α would silently re-bake at a different look. (Fix 4)
+        let store = makeStore()
+        let saved = try store.save(result: Data([0xFF, 0xD8, 0xFF, 0xD9]), reference: nil,
+                                   format: .jpeg, mode: "noiseReduction", frameCount: 5)
+        var adj = ImageAdjustments(blendStrength: 0.4)
+        try store.applyEdit(id: saved.id, adjustments: adj, rendered: Data([0xFF, 0xD8, 0x02, 0xD9]))
+        // Re-read: the reference file is absent, so blendStrength must be normalized to 1.
+        let read = store.adjustments(for: saved.id)
+        XCTAssertEqual(read.blendStrength, 1,
+                       "stale α without a reference file must normalize to 1 on next read")
+        XCTAssertFalse(read.hasBlend, "hasBlend must be false after normalization")
+        _ = adj   // suppress unused-variable warning
+    }
 }

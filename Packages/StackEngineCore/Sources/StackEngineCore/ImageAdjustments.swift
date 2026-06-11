@@ -42,7 +42,7 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
         self.straightenDegrees = straightenDegrees
         self.cropAspect = cropAspect
         self.quarterTurns = ((quarterTurns % 4) + 4) % 4
-        self.blendStrength = blendStrength
+        self.blendStrength = min(max(blendStrength, 0), 1)
     }
 
     public static let identity = ImageAdjustments()
@@ -69,6 +69,7 @@ public struct ImageAdjustments: Sendable, Equatable, Codable {
         cropAspect = try c.decodeIfPresent(CropAspect.self, forKey: .cropAspect) ?? .original
         let rawTurns = try c.decodeIfPresent(Int.self, forKey: .quarterTurns) ?? 0
         quarterTurns = ((rawTurns % 4) + 4) % 4
-        blendStrength = try c.decodeIfPresent(Float.self, forKey: .blendStrength) ?? 1
+        let rawBlend = try c.decodeIfPresent(Float.self, forKey: .blendStrength) ?? 1
+        blendStrength = min(max(rawBlend, 0), 1)
     }
 }

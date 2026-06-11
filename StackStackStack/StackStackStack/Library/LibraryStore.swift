@@ -171,9 +171,18 @@ final class LibraryStore: @unchecked Sendable {
     }
 
     /// The persisted adjustments for a record (identity if none / unreadable).
+    /// If the decoded adjustments carry a blendStrength < 1 but no reference file exists, the α is
+    /// normalized to 1: a persisted α without its reference would silently re-bake at a different
+    /// look on the next save — normalize instead.
     func adjustments(for id: UUID) -> ImageAdjustments {
         guard let data = try? Data(contentsOf: editsURL(for: id)),
-              let adj = try? JSONDecoder().decode(ImageAdjustments.self, from: data) else { return .identity }
+              var adj = try? JSONDecoder().decode(ImageAdjustments.self, from: data) else { return .identity }
+        if adj.blendStrength < 1, let rec = record(for: id) {
+            let refURL = referenceURL(for: id, format: rec.encoderFormat)
+            if !fm.fileExists(atPath: refURL.path) {
+                adj.blendStrength = 1
+            }
+        }
         return adj
     }
 

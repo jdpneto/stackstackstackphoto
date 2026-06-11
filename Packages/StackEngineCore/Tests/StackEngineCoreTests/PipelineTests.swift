@@ -169,6 +169,21 @@ final class PipelineTests: XCTestCase {
                       "reference pixel must equal one input frame's fill value, got \(reference.pixels[0].x)")
     }
 
+    func testLowLightBoostReferenceIsGainMatched() {
+        // For .lowLightBoost the result is boostedMean(gain: 2.0); the reference must be scaled
+        // by the same gain so α trades noise vs. clean at constant brightness, not brightness. (Fix 1)
+        let fill: Float = 0.25
+        let frames = (0..<3).map { _ in
+            PixelImage(width: 4, height: 4, fill: SIMD3<Float>(fill, fill, fill))
+        }
+        let (_, reference) = Pipeline.reduceImagesWithReference(frames, mode: .lowLightBoost, searchRange: 0)
+        let expected = fill * StackReducer.defaultLowLightGain
+        XCTAssertEqual(reference.pixels[0].x, expected, accuracy: 1e-5,
+                       "reference pixel must equal gain × input fill for .lowLightBoost")
+        XCTAssertEqual(reference.pixels[0].y, expected, accuracy: 1e-5)
+        XCTAssertEqual(reference.pixels[0].z, expected, accuracy: 1e-5)
+    }
+
     func testReduceRawPathHandlesAllModes() {
         let w = 8, h = 8
         let frames = (0..<3).map { _ in
