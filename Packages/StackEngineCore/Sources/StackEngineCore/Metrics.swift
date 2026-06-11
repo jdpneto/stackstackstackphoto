@@ -14,6 +14,7 @@ public enum Metrics {
     }
 
     /// PSNR in dB between two equal-length 8-bit buffers (.infinity if identical).
+    /// Alpha byte included (constant 255 on both sides) — pin this so cross-platform numbers match.
     public static func psnr(_ a: [UInt8], _ b: [UInt8]) -> Double {
         precondition(a.count == b.count && !a.isEmpty)
         var mse = 0.0
@@ -36,6 +37,11 @@ public enum Metrics {
     ///   - Window: 8×8 box, stride 4
     ///   - K1 = 0.01, K2 = 0.03, L = 1  (linear-light [0,1] domain)
     ///   - Luma: Rec.709 — 0.2126·R + 0.7152·G + 0.0722·B
+    ///
+    /// Edge cases:
+    ///   - Images with min(width, height) < 8 score 1.0 by convention (no valid windows).
+    ///   - When (width−8) % 4 ≠ 0 or (height−8) % 4 ≠ 0, up to 3px on right/bottom strips are uncovered.
+    ///     Android must match both behaviors.
     ///
     /// Returns mean SSIM over all windows ∈ (−1, 1]; 1.0 for identical images.
     public static func ssim(_ a: PixelImage, _ b: PixelImage) -> Double {
@@ -103,10 +109,11 @@ public enum Metrics {
     ///
     /// Conversion chain (pinned for Android parity):
     ///
-    ///   linear-sRGB → XYZ (D65) via the IEC 61966-2-1 matrix:
+    ///   linear-sRGB → XYZ (D65) via high-precision sRGB D65 derivation (rows sum to the pinned white point):
     ///     X = 0.4124564·R + 0.3575761·G + 0.1804375·B
     ///     Y = 0.2126729·R + 0.7151522·G + 0.0721750·B
     ///     Z = 0.0193339·R + 0.1191920·G + 0.9503041·B
+    ///   The Android port MUST copy these 7-digit literals exactly, not the IEC 61966-2-1 4-dp table.
     ///   (D65 white: Xn=0.95047, Yn=1.00000, Zn=1.08883)
     ///
     ///   XYZ → Lab via:

@@ -21,7 +21,11 @@ import CoreGraphics
 // The fixture generators (goldenBurst / goldenBrackets) are fully deterministic:
 // seeded LCG only, no Date/SystemRandom, no platform-specific paths.
 // Tolerances (minPSNR=45 dB, minSSIM=0.98, maxDeltaE=1.0) are loose enough for
-// cross-platform Float accumulation drift, tight enough to catch algorithm changes.
+// cross-platform Float accumulation drift and libm (sin/pow) last-ULP variance across
+// platforms, yet tight enough to catch algorithm changes. These tolerances are absorbed
+// by the test assertions on both platforms.
+// Determinism is preserved by parallelMap's order-preserving slot-indexed writes,
+// ensuring bit-reproducible results across parallel processing.
 // ============================================================
 
 // MARK: - Fixture generators
@@ -216,14 +220,13 @@ final class GoldenCorpusTests: XCTestCase {
     // MARK: - Depth-of-field look (synthetic brackets → FocusStacker)
 
     func testGoldenDepth() throws {
+        let config = DepthConfig(workingResolution: nil, maxFrames: 12)
+        guard let result = FocusStacker.allInFocus(goldenBrackets(), config: config) else {
+            XCTFail("FocusStacker.allInFocus returned nil on goldenBrackets")
+            return
+        }
         try runGoldenTest(name: "depth") {
-            let config = DepthConfig(workingResolution: nil, maxFrames: 12)
-            guard let result = FocusStacker.allInFocus(goldenBrackets(), config: config) else {
-                XCTFail("FocusStacker.allInFocus returned nil on goldenBrackets")
-                // Return a placeholder so the types compile; XCTFail already marks failure.
-                return PixelImage(width: 1, height: 1)
-            }
-            return result
+            result
         }
     }
 
