@@ -79,6 +79,8 @@ One product, progressive disclosure. The look-picker and live preview are identi
 - **Capture:** CameraX where sufficient, dropping to Camera2 for RAW + manual focus control.
 - **Compute:** Vulkan compute shaders (primary), with an optional OpenCV assist for feature detection. OpenGL ES 3.2 compute as a fallback.
 
+> **Implementation status (2026-06-11).** The Android engine shipped as a 1:1 Kotlin/JVM port of the shared `StackEngineCore` algorithms (NOT the per-platform Vulkan stack of §7.4 — see the delta doc's deviation #3) and passes the §18 golden corpus bit-exactly against the iOS reference outputs. Min SDK 33 per §5.2; Camera2 RAW capture and the Compose app are the next phase (see 2026-06-11-android-port-design.md).
+
 ### 5.3 Capability gating (Android fragmentation is a first-class concern)
 At launch the app probes device capabilities and adapts:
 

@@ -1,0 +1,4 @@
+.gradle/
+build/
+stackengine/build/
+local.properties
