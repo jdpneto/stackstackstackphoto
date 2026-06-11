@@ -13,7 +13,7 @@
 2. **Settings + Onboarding — DONE (PR #31).** Third tab (save-to-Photos, JPEG/HEIC capture-time format, storage, capability report, replay intro, about) + first-launch onboarding. Still missing from §15.6 by design: RAW toggle, grid/level, max session length (see the bible's §15.6 status note).
 3. **Blend strength — DONE (PR #32, as a full-quality edit).** Deviation: no proxy stack — the working-res aligned reference is stored (`<uuid>.ref.<ext>`) and α is an ImageAdjustments field applied at full resolution (lerp needs the endpoints, not the reducer). Re-tuning other capture params stays out of scope (§9.3).
 4. **Capture safeguards — DONE except metering (PR #33).** Thermal policy (warn+halve at serious, block at critical), storage pre-flight, low-battery warning, and the non-RAW "Standard quality" HEIC fallback (CapturedBurst). Still missing: insufficient-light/overexposure metering guidance (needs live AE sampling — see the capture-safeguards spec §1). (§5.3, §10.2, §16, §17)
-5. **No golden-image corpus.** Unit tests are strong (engine + app), but the cross-platform divergence guardrail of §18 — shared RAW sequences, reference outputs, PSNR/SSIM/ΔE tolerances in CI — does not exist. SSIM and ΔE metrics are unimplemented (`Metrics.swift` has PSNR and maxAbsDiff only). This becomes load-bearing the day Android starts.
+5. **Golden-image corpus — DONE with scope (feat/golden-corpus).** SSIM (`Metrics.ssim`) and ΔE76 (`Metrics.meanDeltaE`) metrics implemented. `GoldenCorpusTests` (always-on, fast, no env gate) pins every look's full-pipeline output against committed reference PNGs (`Resources/golden/`) with PSNR ≥ 45 dB / SSIM ≥ 0.98 / ΔE ≤ 1.0 tolerances — the Android cross-platform contract. Corpus is Tier 1 synthetic only (deterministic 96×64 Bayer sequences + focus brackets); remaining open scope: real-bracket Tier 2 corpus, performance/thermal benchmarks with regression thresholds, field scene suite (water/clouds/night/macro), CIEDE2000 upgrade.
 6. **The Stack record is minimal.** `StackRecord` persists `id, createdAt, mode, frameCount, resultFileName, updatedAt` — none of the §9.1 capture metadata (per-frame ISO/shutter/lensPosition/timestamps, sensor info, rawUsed), result metadata, recipe, or EXIF. Output JPEGs carry no EXIF or ICC profile.
 
 ---
@@ -34,7 +34,7 @@
 | §15 UX screens | Mostly done | Capture + Gallery + detail/editor + Settings + Onboarding; processing/gallery chrome gaps remain |
 | §16 Performance/thermal | Partial | Streaming reducers + managed working resolution (2400px) done; **engine is CPU/SIMD, not Metal**; thermal/battery/storage policy done; no perf regression gates |
 | §17 Error handling | Partial | Permission/no-RAW/no-frames/cancel handled; thermal/battery/storage responses done; alignment-failure messaging and metering responses missing |
-| §18 Testing | Partial | 24 engine + 10 app unit test files, simulator UI tests, device camera tests; golden corpus / SSIM / ΔE / perf benchmarks / field suite missing |
+| §18 Testing | Partial | 24 engine + 10 app unit test files, simulator UI tests, device camera tests; SSIM + ΔE metrics done; Tier-1 golden corpus (synthetic Bayer, 5 looks) done; real-bracket Tier-2 corpus / perf benchmarks / field suite missing |
 
 ---
 
@@ -132,8 +132,9 @@ Engine has: modified-Laplacian 5×5 sharpness, guided-filter-regularized selecti
 
 ### 11. Testing (§18)
 
-- Implemented: 24 engine unit-test files (alignment, demosaic/color, every reducer, focus stack, pyramids, editor, output transform, streaming, metrics), 10 app unit-test files, simulator UI flow tests, physical-device camera tests. PSNR used in synthetic pipeline tests.
-- Missing: **golden-image corpus** (shared RAW inputs + reference outputs + pinned tolerances, run in CI — the §7.5/§18 cross-platform guardrail), **SSIM** and **ΔE** metrics, performance/thermal benchmarks with regression thresholds, field scene suite (water/clouds/night traffic/low light/macro).
+- Implemented: 24 engine unit-test files (alignment, demosaic/color, every reducer, focus stack, pyramids, editor, output transform, streaming, metrics), 10 app unit-test files, simulator UI flow tests, physical-device camera tests.
+- **Done (feat/golden-corpus):** `Metrics.ssim` (8×8 box windows, Rec.709 luma, population variance) and `Metrics.meanDeltaE` (linear-sRGB→XYZ→Lab→ΔE76, pinned D65 matrix). `GoldenCorpusTests` — Tier-1 synthetic corpus: always-on, deterministic 96×64 Bayer bursts (seeded LCG, 6 frames, per-frame jitter+noise) + focus brackets; one committed reference PNG per look (`Resources/golden/`); PSNR ≥ 45 dB / SSIM ≥ 0.98 / ΔE ≤ 1.0 tolerances (the Android contract); regeneration via `SSS_REGENERATE_GOLDENS=1`.
+- Missing: **Tier-2 real-bracket corpus**, performance/thermal benchmarks with regression thresholds, field scene suite (water/clouds/night traffic/low light/macro), CIEDE2000 upgrade.
 
 ---
 
