@@ -128,4 +128,150 @@ class Camera2ColorMappingTest {
     fun chooseRawSizeEmptyReturnsNull() {
         assertNull(chooseRawSize(emptyList<Pair<Int, Int>>(), areaOf = ::area))
     }
+
+    // --- focusDiopters (iOS lensPosition 0=near/1=far → Camera2 diopters 0=far/max=near) ---
+
+    @Test
+    fun focusDioptersInvertsTheIosConvention() {
+        // Position 0 (iOS closest) → the lens's largest diopter value (closest focus).
+        assertEquals(10f, focusDiopters(0f, 10f), eps)
+        // Position 1 (iOS infinity) → 0 diopters (Camera2 infinity).
+        assertEquals(0f, focusDiopters(1f, 10f), eps)
+        // Midpoint scales linearly.
+        assertEquals(5f, focusDiopters(0.5f, 10f), eps)
+    }
+
+    @Test
+    fun focusDioptersClampsWildPositions() {
+        assertEquals(10f, focusDiopters(-3f, 10f), eps)
+        assertEquals(0f, focusDiopters(7f, 10f), eps)
+    }
+
+    // --- clampedSensitivity / clampedExposureNanos (manual Pro overrides → device ranges) ---
+
+    @Test
+    fun sensitivityWithinRangePassesThrough() {
+        assertEquals(400, clampedSensitivity(400, 50, 6400))
+    }
+
+    @Test
+    fun sensitivityClampsToRangeEnds() {
+        assertEquals(50, clampedSensitivity(25, 50, 6400))
+        assertEquals(6400, clampedSensitivity(12800, 50, 6400))
+    }
+
+    @Test
+    fun sensitivityNullBoundsMeanNoClamp() {
+        assertEquals(12800, clampedSensitivity(12800, null, null))
+        assertEquals(50, clampedSensitivity(25, 50, null))
+    }
+
+    @Test
+    fun exposureNanosConvertsSeconds() {
+        assertEquals(10_000_000L, clampedExposureNanos(0.01, null, null))   // 1/100 s
+        assertEquals(1_000_000_000L, clampedExposureNanos(1.0, null, null))
+    }
+
+    @Test
+    fun exposureNanosClampsToRangeEnds() {
+        // 1/8000 s floor, 1/2 s ceiling.
+        assertEquals(125_000L, clampedExposureNanos(0.00001, 125_000L, 500_000_000L))
+        assertEquals(500_000_000L, clampedExposureNanos(2.0, 125_000L, 500_000_000L))
+    }
+
+    // --- burstShouldFinish (two-sided join: frames requested AND join conversions drained) ---
+
+    @Test
+    fun burstDoesNotFinishWhileFramesRemain() {
+        assertEquals(false, burstShouldFinish(remaining = 3, expectedJoins = 0, joined = 0))
+    }
+
+    @Test
+    fun burstDoesNotFinishBeforeTheLastJoinLands() {
+        // Regression for the dropped-last-frame race: the capture result advanced `remaining`
+        // to 0 but the final image buffer is still converting → must keep waiting.
+        assertEquals(false, burstShouldFinish(remaining = 0, expectedJoins = 8, joined = 7))
+    }
+
+    @Test
+    fun burstFinishesWhenAllJoinsDrained() {
+        assertEquals(true, burstShouldFinish(remaining = 0, expectedJoins = 8, joined = 8))
+        // Zero-join finish (every capture failed) is legal — finishLocked reports NoFramesProduced.
+        assertEquals(true, burstShouldFinish(remaining = 0, expectedJoins = 0, joined = 0))
+    }
+
+    // --- meteringRectFromPreviewTap (normalized preview tap → active-array pixel rect) ---
+
+    // Round-number active array used by most cases: 4000×3000, default 10% region → 400×300.
+
+    @Test
+    fun meteringRectOrientation0IsIdentity() {
+        // Centre tap → centred rect.
+        assertEquals(
+            ActiveArrayRect(1800, 1350, 400, 300),
+            meteringRectFromPreviewTap(0.5f, 0.5f, 0, 4000, 3000)
+        )
+    }
+
+    @Test
+    fun meteringRectOrientation90UndoesTheClockwiseRotation() {
+        // The dictated device case: Pixel-style sensorOrientation=90, active array 4032×3024,
+        // portrait tap (0.9, 0.5) = right-centre of the preview = top-centre of the sensor image.
+        // Inverse-rotated sensor point: u = y = 0.5, v = 1 - x = 0.100000024 (float).
+        //   rw = (4032*0.1f).toInt() = 403, rh = (3024*0.1f).toInt() = 302
+        //   centre = (0.5*4032, 0.100000024*3024) = (2016, 302.40007) → (2016, 302)
+        //   left = 2016 - 403/2 = 2016 - 201 = 1815, top = 302 - 302/2 = 302 - 151 = 151
+        assertEquals(
+            ActiveArrayRect(1815, 151, 403, 302),
+            meteringRectFromPreviewTap(0.9f, 0.5f, 90, 4032, 3024)
+        )
+    }
+
+    @Test
+    fun meteringRectOrientation180Mirrors() {
+        // (u,v) = (1-x, 1-y) = (0.75, 0.75) → centre (3000, 2250) → left 2800, top 2100.
+        assertEquals(
+            ActiveArrayRect(2800, 2100, 400, 300),
+            meteringRectFromPreviewTap(0.25f, 0.25f, 180, 4000, 3000)
+        )
+    }
+
+    @Test
+    fun meteringRectOrientation270IsTheOtherInverse() {
+        // (u,v) = (1-y, x) = (0.5, 0.75) → centre (2000, 2250) → left 1800, top 2100.
+        assertEquals(
+            ActiveArrayRect(1800, 2100, 400, 300),
+            meteringRectFromPreviewTap(0.75f, 0.5f, 270, 4000, 3000)
+        )
+    }
+
+    @Test
+    fun meteringRectClampsInsideTheActiveArray() {
+        // Corner taps must stay fully inside the array (Camera2 rejects out-of-bounds regions).
+        assertEquals(
+            ActiveArrayRect(0, 0, 400, 300),
+            meteringRectFromPreviewTap(0f, 0f, 0, 4000, 3000)
+        )
+        assertEquals(
+            ActiveArrayRect(3600, 2700, 400, 300),
+            meteringRectFromPreviewTap(1f, 1f, 0, 4000, 3000)
+        )
+        // Out-of-range taps are clamped to the edge, not wrapped.
+        assertEquals(
+            ActiveArrayRect(0, 0, 400, 300),
+            meteringRectFromPreviewTap(-2f, -2f, 0, 4000, 3000)
+        )
+    }
+
+    @Test
+    fun meteringRectNormalizesOrientationModulo360() {
+        assertEquals(
+            meteringRectFromPreviewTap(0.3f, 0.6f, 90, 4000, 3000),
+            meteringRectFromPreviewTap(0.3f, 0.6f, 450, 4000, 3000)
+        )
+        assertEquals(
+            meteringRectFromPreviewTap(0.3f, 0.6f, 270, 4000, 3000),
+            meteringRectFromPreviewTap(0.3f, 0.6f, -90, 4000, 3000)
+        )
+    }
 }

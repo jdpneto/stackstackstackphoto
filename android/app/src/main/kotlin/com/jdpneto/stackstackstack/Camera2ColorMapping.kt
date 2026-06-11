@@ -91,3 +91,101 @@ internal fun blackLevelFromPattern(offsets: FloatArray): Float {
     if (offsets.isEmpty()) return 64f
     return offsets.sum() / offsets.size
 }
+
+// ---------------------------------------------------------------------------
+// Burst / capture-request mapping helpers (pure; the service feeds them primitives)
+// ---------------------------------------------------------------------------
+
+/**
+ * Focus-distance mapping (Camera2 LENS_FOCUS_DISTANCE, in diopters):
+ *   iOS `lensPosition`: 0 = closest focus, 1 = infinity (far).
+ *   Camera2: 0 = infinity, large positive = closest (diopters).
+ *   Mapping: diopters = (1 - position) × minimumFocusDistance.
+ * `minimumFocusDistance` (LENS_INFO_MINIMUM_FOCUS_DISTANCE — paradoxically named) is the LARGEST
+ * diopter value, the closest-focus limit of the lens. This inversion is intentional and mirrors
+ * exactly the opposite of the iOS API; documented so future porters don't accidentally re-invert.
+ */
+internal fun focusDiopters(position: Float, minimumFocusDistance: Float): Float =
+    (1f - position.coerceIn(0f, 1f)) * minimumFocusDistance
+
+/**
+ * Manual ISO → SENSOR_SENSITIVITY, clamped to SENSOR_INFO_SENSITIVITY_RANGE (null bound = no
+ * clamp on that side; legacy HALs may not report the range). Mirrors iOS clamping to
+ * `activeFormat.minISO…maxISO`.
+ */
+internal fun clampedSensitivity(requested: Int, lower: Int?, upper: Int?): Int {
+    var v = requested
+    if (lower != null && v < lower) v = lower
+    if (upper != null && v > upper) v = upper
+    return v
+}
+
+/**
+ * Manual shutter seconds → SENSOR_EXPOSURE_TIME nanoseconds, clamped to
+ * SENSOR_INFO_EXPOSURE_TIME_RANGE (null bound = no clamp). Mirrors iOS clamping to
+ * `activeFormat.minExposureDuration…maxExposureDuration`.
+ */
+internal fun clampedExposureNanos(seconds: Double, lowerNs: Long?, upperNs: Long?): Long {
+    var ns = (seconds * 1_000_000_000.0).toLong()
+    if (lowerNs != null && ns < lowerNs) ns = lowerNs
+    if (upperNs != null && ns > upperNs) ns = upperNs
+    return ns
+}
+
+/**
+ * Burst completion predicate: every frame has been requested ([remaining] == 0) AND every
+ * completed capture's image+result join has finished converting ([joined] ≥ [expectedJoins]).
+ * Finishing on [remaining] alone dropped the last frame whenever its buffer was still in flight
+ * (a 1-frame burst became NoFramesProduced); the join side is bounded by the service's drain
+ * timeout, never waited on unconditionally.
+ */
+internal fun burstShouldFinish(remaining: Int, expectedJoins: Int, joined: Int): Boolean =
+    remaining <= 0 && joined >= expectedJoins
+
+// ---------------------------------------------------------------------------
+// Tap-to-focus metering geometry
+// ---------------------------------------------------------------------------
+
+/** Axis-aligned rectangle in SENSOR_INFO_ACTIVE_ARRAY_SIZE pixel coordinates. */
+internal data class ActiveArrayRect(val x: Int, val y: Int, val width: Int, val height: Int)
+
+/** Metering region edge length as a fraction of each active-array dimension. */
+internal const val METERING_REGION_FRACTION = 0.1f
+
+/**
+ * Map a normalized tap on the PREVIEW (0…1 in the displayed, rotated image) into a
+ * MeteringRectangle-ready rect in SENSOR active-array PIXEL coordinates.
+ *
+ * Camera2 metering regions live in SENSOR_INFO_ACTIVE_ARRAY_SIZE pixel space ((0,0) = top-left
+ * of the active array), NOT a normalized 0–1000 space — passing normalized values produced a
+ * region pinned to the sensor's top-left corner.
+ *
+ * The preview shows the sensor image rotated CLOCKWISE by SENSOR_ORIENTATION (back camera,
+ * natural-portrait display — the app's capture screen; display-rotation compensation is the
+ * coordinator's concern). This function applies the INVERSE rotation to the tap point:
+ *   0°: (u,v) = (x, y)      90°: (u,v) = (y, 1-x)
+ * 180°: (u,v) = (1-x, 1-y) 270°: (u,v) = (1-y, x)
+ * then centres a [sizeFraction]-sized rect on the sensor point, clamped inside the active array.
+ */
+internal fun meteringRectFromPreviewTap(
+    x: Float,
+    y: Float,
+    sensorOrientation: Int,
+    activeArrayWidth: Int,
+    activeArrayHeight: Int,
+    sizeFraction: Float = METERING_REGION_FRACTION
+): ActiveArrayRect {
+    val px = x.coerceIn(0f, 1f)
+    val py = y.coerceIn(0f, 1f)
+    val (u, v) = when (((sensorOrientation % 360) + 360) % 360) {
+        90   -> py to (1f - px)
+        180  -> (1f - px) to (1f - py)
+        270  -> (1f - py) to px
+        else -> px to py
+    }
+    val rw = (activeArrayWidth * sizeFraction).toInt().coerceIn(1, activeArrayWidth)
+    val rh = (activeArrayHeight * sizeFraction).toInt().coerceIn(1, activeArrayHeight)
+    val left = ((u * activeArrayWidth).toInt() - rw / 2).coerceIn(0, activeArrayWidth - rw)
+    val top  = ((v * activeArrayHeight).toInt() - rh / 2).coerceIn(0, activeArrayHeight - rh)
+    return ActiveArrayRect(left, top, rw, rh)
+}
