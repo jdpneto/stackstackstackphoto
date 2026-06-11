@@ -12,7 +12,7 @@
 1. **Depth of Field — DONE (PR #30).** Shipped end-to-end: chain alignment (adjacent-bracket links + bounds), lensPosition focus sweep, Depth chip + Near/Far Pro controls, capability gating, real-bracket regression fixture.
 2. **Settings + Onboarding — DONE (PR #31).** Third tab (save-to-Photos, JPEG/HEIC capture-time format, storage, capability report, replay intro, about) + first-launch onboarding. Still missing from §15.6 by design: RAW toggle, grid/level, max session length (see the bible's §15.6 status note).
 3. **Blend strength — DONE (PR #32, as a full-quality edit).** Deviation: no proxy stack — the working-res aligned reference is stored (`<uuid>.ref.<ext>`) and α is an ImageAdjustments field applied at full resolution (lerp needs the endpoints, not the reducer). Re-tuning other capture params stays out of scope (§9.3).
-4. **No capture-time safeguards:** no thermal monitoring (`ProcessInfo.thermalState`), no low-battery check, no storage-full pre-flight, no metering guidance, no YUV/HEIC fallback on non-RAW devices (capture just throws `CaptureError.noRawFormat`). (§5.3, §10.2, §16, §17)
+4. **Capture safeguards — DONE except metering (this PR).** Thermal policy (warn+halve at serious, block at critical), storage pre-flight, low-battery warning, and the non-RAW "Standard quality" HEIC fallback (CapturedBurst). Still missing: insufficient-light/overexposure metering guidance (needs live AE sampling — see the capture-safeguards spec §1). (§5.3, §10.2, §16, §17)
 5. **No golden-image corpus.** Unit tests are strong (engine + app), but the cross-platform divergence guardrail of §18 — shared RAW sequences, reference outputs, PSNR/SSIM/ΔE tolerances in CI — does not exist. SSIM and ΔE metrics are unimplemented (`Metrics.swift` has PSNR and maxAbsDiff only). This becomes load-bearing the day Android starts.
 6. **The Stack record is minimal.** `StackRecord` persists `id, createdAt, mode, frameCount, resultFileName, updatedAt` — none of the §9.1 capture metadata (per-frame ISO/shutter/lensPosition/timestamps, sensor info, rawUsed), result metadata, recipe, or EXIF. Output JPEGs carry no EXIF or ICC profile.
 
@@ -32,8 +32,8 @@
 | §13.3 Long exposure | Done (improved) | Mean / lighten / boosted-mean reducers + streaming accumulation done; light trails upgraded to motion-masked composite (deliberate deviation); α blend done (full-quality, stored reference) |
 | §14 Editor | Mostly done | Non-destructive EV/contrast/WB/shadows/highlights/crop/straighten (+90° rotate) + blend-strength slider (full-quality lerp) done; no tone curve control |
 | §15 UX screens | Mostly done | Capture + Gallery + detail/editor + Settings + Onboarding; processing/gallery chrome gaps remain |
-| §16 Performance/thermal | Partial | Streaming reducers + managed working resolution (2400px) done; **engine is CPU/SIMD, not Metal**; no thermal/battery policy; no perf regression gates |
-| §17 Error handling | Partial | Permission/no-RAW/no-frames/cancel handled; alignment-failure messaging, storage/thermal/battery/metering responses missing |
+| §16 Performance/thermal | Partial | Streaming reducers + managed working resolution (2400px) done; **engine is CPU/SIMD, not Metal**; thermal/battery/storage policy done; no perf regression gates |
+| §17 Error handling | Partial | Permission/no-RAW/no-frames/cancel handled; thermal/battery/storage responses done; alignment-failure messaging and metering responses missing |
 | §18 Testing | Partial | 24 engine + 10 app unit test files, simulator UI tests, device camera tests; golden corpus / SSIM / ΔE / perf benchmarks / field suite missing |
 
 ---
@@ -114,21 +114,21 @@ Engine has: modified-Laplacian 5×5 sharpness, guided-filter-regularized selecti
 ### 9. Performance & thermal (§16)
 
 - **Engine is pure-Swift CPU/SIMD, not Metal/MPS** (§7.3 says Metal compute). This is a deliberate architecture change for determinism + Android parity (see CLAUDE.md); code comments say "slow on CPU until Metal". The spec's §7.3/§16 should be amended, and a Metal/Accelerate acceleration phase planned if the §16 timing targets (20-frame 12MP denoise ≤ 5s) are to be met.
-- Implemented levers: managed working resolution (2400px long edge), streaming reducers, serialized background stacking, shutter gating during processing.
-- Missing: **thermal monitoring + throttle/abort policy**, **battery checks**, **measured perf targets / regression thresholds**.
+- Implemented levers: managed working resolution (2400px long edge), streaming reducers, serialized background stacking, shutter gating during processing, thermal/battery/storage policy (see capture-safeguards spec).
+- Missing: **measured perf targets / regression thresholds**.
 
 ### 10. Error handling (§17)
 
 | §17 situation | Status |
 |---|---|
 | Alignment failure → fall back + "hold steadier" | Missing (no confidence metric, no messaging) |
-| No RAW → standard-quality fallback | Missing (hard error instead) |
+| No RAW → standard-quality fallback | Done (CapturedBurst, HEIC fallback with working-res decode) |
 | No manual focus → disable Depth | N/A until Depth ships (then required) |
 | Insufficient light / overexposure guidance | Missing |
 | Excess motion during long exposure | Partial — live gauge + capture gating; no extend/abort flow |
 | Interruption (call/background) mid-capture | Partial — cancellation tokens + per-frame watchdog; backgrounding behavior untested/undocumented |
-| Storage full pre-flight | Missing |
-| Low battery / thermal critical | Missing |
+| Storage full pre-flight | Done (CaptureEnvironment, 200 MB minimum check) |
+| Low battery / thermal critical | Done (low-battery warning at 10%, thermal halve at serious, block at critical) |
 
 ### 11. Testing (§18)
 
