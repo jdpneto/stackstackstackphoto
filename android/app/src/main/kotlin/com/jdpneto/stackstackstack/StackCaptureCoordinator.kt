@@ -704,17 +704,26 @@ class StackCaptureCoordinator(
      * [diagDirectory]/<storageKey>-<epochMs>/frame-NN.jpg — for offline alignment debugging AND
      * for extracting real-capture fixtures for the engine's regression harness.
      * Mirrors iOS `dumpFramesForDiagnostics`. Off by default; MainActivity enables it from a
-     * debug-gated `dumpFrames` intent extra.
+     * debug-gated `dumpFrames` intent extra. @Volatile: set on the main thread, read on
+     * [processingDispatcher] — no other synchronization guards these two fields.
      */
-    var dumpFramesForDiagnostics: Boolean = false
+    @Volatile var dumpFramesForDiagnostics: Boolean = false
 
     /** Where diagnostic frame dumps go (set by the activity to filesDir/diag). */
-    var diagDirectory: java.io.File? = null
+    @Volatile var diagDirectory: java.io.File? = null
 
     /**
      * Develop + dump a RAW burst's frames WITHOUT consuming the one-shot payload holder (the
      * normal pipeline re-develops them — acceptable double work behind a debug flag). JPEG q95
-     * at the batch working resolution: the same inputs the align/stack stages see.
+     * at the BATCH working resolution for every look — for Detail/Night/Depth on a small-heap
+     * device that matches the pipeline's input; for the streaming looks (which run at
+     * [managedWorkingResolution]) the dump is one halving BELOW device scale. Good enough for a
+     * regression contract and offline debugging; NOT a device-scale fidelity guarantee.
+     *
+     * Best-effort by contract (iOS parity): a dump failure of ANY kind — IO, or the batch
+     * develop OOMing on a long streaming burst the real pipeline would have streamed — must
+     * never cost the user's shot, hence the blanket Throwable catch. Prior dumps are cleared
+     * first so files/diag doesn't grow without bound across captures.
      */
     private fun dumpDiagFrames(
         payloadRef: java.util.concurrent.atomic.AtomicReference<CapturedBurst.Payload?>,
@@ -722,20 +731,26 @@ class StackCaptureCoordinator(
         frameCount: Int,
         encode: (ByteArray, Int, Int, ImageEncoder.Format, Double, ImageEncoder.ExifMetadata?) -> ByteArray
     ) {
-        val dir = diagDirectory ?: return
-        val frames = (payloadRef.get() as? CapturedBurst.Payload.Raw)?.frames ?: return
-        val resolution = achievableWorkingResolution(
-            budgetEdge     = heapAwareWorkingResolution(frameCount = frameCount),
-            sourceLongEdge = peekRawLongEdge(payloadRef) / 2
-        )
-        val developed = Pipeline.developedFrames(frames, binnedDevelop = true, workingResolution = resolution)
-        val out = java.io.File(dir, "${mode.storageKey}-${System.currentTimeMillis()}")
-        out.mkdirs()
-        developed.forEachIndexed { i, img ->
-            val rgba = OutputTransform.encodeSRGB8(img)
-            java.io.File(out, "frame-%02d.jpg".format(i)).writeBytes(
-                encode(rgba, img.width, img.height, ImageEncoder.Format.JPEG, 0.95, null)
+        try {
+            val dir = diagDirectory ?: return
+            val frames = (payloadRef.get() as? CapturedBurst.Payload.Raw)?.frames ?: return
+            dir.listFiles()?.filter { it.name.startsWith("${mode.storageKey}-") }
+                ?.forEach { it.deleteRecursively() }
+            val resolution = achievableWorkingResolution(
+                budgetEdge     = heapAwareWorkingResolution(frameCount = frameCount),
+                sourceLongEdge = peekRawLongEdge(payloadRef) / 2
             )
+            val developed = Pipeline.developedFrames(frames, binnedDevelop = true, workingResolution = resolution)
+            val out = java.io.File(dir, "${mode.storageKey}-${System.currentTimeMillis()}")
+            if (!out.mkdirs()) return
+            developed.forEachIndexed { i, img ->
+                val rgba = OutputTransform.encodeSRGB8(img)
+                java.io.File(out, "frame-%02d.jpg".format(i)).writeBytes(
+                    encode(rgba, img.width, img.height, ImageEncoder.Format.JPEG, 0.95, null)
+                )
+            }
+        } catch (t: Throwable) {
+            android.util.Log.w("SSSCoord", "diagnostic frame dump failed (shot unaffected)", t)
         }
     }
 

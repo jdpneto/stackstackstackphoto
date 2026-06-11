@@ -96,6 +96,10 @@ class MainActivity : ComponentActivity() {
         if (debuggableApp && intent.getBooleanExtra("dumpFrames", false)) {
             coordinator.dumpFramesForDiagnostics = true
             coordinator.diagDirectory = java.io.File(filesDir, "diag")
+        } else if (intent.getBooleanExtra("dumpFrames", false)) {
+            // The debug-keystore-SIGNED Release build is not debuggable — say so instead of
+            // silently dropping the extra (the dump only works in debuggable builds).
+            android.util.Log.w("SSSCoord", "dumpFrames extra ignored: not a debuggable build")
         }
 
         setContent {

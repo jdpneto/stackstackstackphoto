@@ -234,11 +234,12 @@ fun CaptureScreen(
         }
 
         // ── Bottom control stack ──────────────────────────────────────────────
-        // Fix 4: align the controls block to BottomCenter of the parent Box so it stays pinned
-        // to the bottom in BOTH portrait and landscape. The iOS equivalent is a Spacer() that
-        // pushes the controls block to the end of the VStack. Using Alignment.BottomCenter on
-        // the Column's Box alignment is more robust than a full-size Column with Arrangement.Bottom
-        // (which floats mid-screen in landscape because the content is shorter than the view height).
+        // A full-size Column with Arrangement.Bottom: the controls hug the bottom edge (iOS:
+        // Spacer pushing the VStack's controls down) and the full height exists so the result
+        // preview's weight(1f, fill = false) can claim ONLY the leftover space above them.
+        // (An earlier BottomCenter-aligned wrap-height Column pinned the controls equally well
+        // but gave weight() nothing to distribute, so the preview overflowed it in landscape —
+        // device-verified: this exact configuration passed the five-look matrix both ways.)
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)

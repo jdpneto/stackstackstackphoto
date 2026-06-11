@@ -8,8 +8,12 @@ import CoreGraphics
 // REAL-CAPTURE CROSS-PLATFORM CONTRACT (bible §18 tier: real device data)
 // ============================================================
 // Five RAW bursts captured on a Pixel 10 Pro (2026-06-11 device verification), developed to
-// working-resolution frames (1020×768, JPEG q95) — EXACTLY the linear-light input the engine's
-// align/stack stages see on device. One burst per look:
+// working-resolution frames (1020×768, JPEG q95). For the batch looks (Detail/Night) and Depth
+// on a 512MB-heap device this matches the pipeline input; the streaming looks (Smooth/Trails)
+// run on device at managedWorkingResolution (2040px on this sensor) — those fixtures are one
+// halving below device scale, and the suite stacks them through the batch reduce rather than
+// the streaming fold (same math, different memory shape). A real-content REGRESSION CONTRACT,
+// not a device-scale fidelity guarantee. One burst per look:
 //
 //   noiseReduction (8 frames) / smoothMotion (5) / lightTrails (10) / lowLightBoost (6)
 //   depthOfField (5 — a near→far focus sweep through FocusStacker, not Pipeline.reduce)
@@ -54,7 +58,7 @@ final class RealCaptureRegressionTests: XCTestCase {
         try requireOptIn()
         try runRealCaptureTest(name: "noiseReduction", frameCount: 8) { frames in
             // Frames are already at working resolution — no further downscale (workingResolution
-            // = nil), default searchRange: the exact parameters of the device batch path.
+            // = nil), default searchRange (the batch reduce; see the header's fidelity note).
             Pipeline.reduceImages(frames, mode: .noiseReduction)
         }
     }
