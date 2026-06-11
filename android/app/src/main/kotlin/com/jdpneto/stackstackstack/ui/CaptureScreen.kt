@@ -242,14 +242,22 @@ fun CaptureScreen(
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .fillMaxWidth()
+                .fillMaxSize()
                 .padding(bottom = 40.dp),
             verticalArrangement = Arrangement.Bottom,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // Result preview or look label.
             resultBitmap?.let { bmp ->
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // weight(fill = false) gives the preview ONLY the height left over by the
+                // controls below it — the Compose equivalent of iOS's `.scaledToFit()` between
+                // Spacers. A fixed-height preview overflowed the column in landscape, leaving
+                // the chips/shutter drawn under the Edit/Done row where taps couldn't reach
+                // them (live device finding: the capture UI went dead after the first shot).
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.weight(1f, fill = false)
+                ) {
                     // iOS uses `.resizable().scaledToFit()` between Spacers, so SwiftUI gives the
                     // preview only the space left over by the controls. Compose doesn't negotiate
                     // that way: an unconstrained fillMaxWidth Image takes its full scaled height
@@ -261,6 +269,7 @@ fun CaptureScreen(
                         contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .weight(1f, fill = false)   // shrink before the Edit/Done row does
                             .heightIn(max = 180.dp)
                             .padding(horizontal = 16.dp)
                     )
