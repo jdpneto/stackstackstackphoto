@@ -1,5 +1,25 @@
 # Manual Device Test Plan — overnight run (PRs #31–#35)
 
+## Results — automated device pass, 2026-06-11 morning (Release build, fresh install)
+
+| # | Test | Result |
+|---|---|---|
+| A1 | Fresh-install onboarding + real camera dialog | PASS — onboarding gates the root, NO system prompt until "Enable Camera"; Allow lands on a live viewfinder. **Finding 1:** landscape camera page clips the Enable Camera/Done buttons behind the page dots (portrait correct). **Finding 2 (cosmetic):** page-dot indicator overlaps the second text line. |
+| A2 | Photos auto-export | PASS — contextual add-only prompt on first export; subsequent exports clean ("Saved ✓" with no failure note). Denied path NOT tested (needs Settings.app toggling) — for David. |
+| A3 | HEIC end-to-end | PASS — record + original + reference all `.heic`; edit re-render stays HEIC; mixed JPEG/HEIC library coexists. |
+| A4 | Storage numbers | PASS (1 stack = 2.1 MB, sane). Delete All intentionally NOT exercised — left for David. |
+| B5 | Blend sweep | PASS — slider present on the Smooth/HEIC record, α≈0 visibly switches to the sharp reference, save persists `blendStrength: 0.1`, record stays HEIC. |
+| B6 | Night gain-match | PASS (numeric) — reference/result mean-luma ratio **1.007** (unboosted would be ≈0.5). |
+| B7 | No Blend on Depth | PASS. |
+| C8-9,11 | Thermal / storage-full / low-battery | NOT testable on demand — opportunistic, for David. |
+| C10 | Non-RAW fallback | Not testable on this hardware (has RAW) — capability rows correctly read "Supported". |
+| D12 | EXIF/ICC | PASS — on-device HEIC carries ISO 400, 1/60s, correct DateTimeOriginal, Software tag, embedded sRGB; index.json records iso/shutter. |
+| E13 | All-looks sweep | PASS — Detail, Smooth, Trails, Night, Depth all captured + saved on the Release build. |
+
+**Open findings for a follow-up fix:** (1) onboarding camera-page buttons clipped in landscape; (2) page-dots/text overlap.
+**Remaining for David:** Photos denied path, Delete All, opportunistic thermal/battery/storage-full, non-RAW hardware someday.
+
+
 Draft for discussion. Everything below is simulator-green but needs (or strongly benefits from) a physical-device pass. Ordered by value. Device: David's iPhone (RAW + manual-focus capable), mobile-mcp workflow available.
 
 ## A. Settings + Onboarding (PR #31)
