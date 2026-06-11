@@ -91,6 +91,13 @@ class MainActivity : ComponentActivity() {
         coordinator.exportFormat        = settings.exportFormat
         coordinator.saveToPhotosEnabled = settings.saveToPhotos
 
+        // Debug-gated frame dump (offline alignment debugging + harness fixture extraction).
+        val debuggableApp = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (debuggableApp && intent.getBooleanExtra("dumpFrames", false)) {
+            coordinator.dumpFramesForDiagnostics = true
+            coordinator.diagDirectory = java.io.File(filesDir, "diag")
+        }
+
         setContent {
             StackTheme {
                 AppRoot(coordinator, settings, store)

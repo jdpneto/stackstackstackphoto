@@ -700,10 +700,44 @@ class StackCaptureCoordinator(
     private val depthWorkingResolution: Int? = DepthConfig.auto.workingResolution
 
     /**
-     * DEBUG: dump the developed frames for offline alignment debugging. Off for release.
-     * Mirrors iOS `dumpFramesForDiagnostics`.
+     * DEBUG: dump the developed working-resolution frames of each RAW burst to
+     * [diagDirectory]/<storageKey>-<epochMs>/frame-NN.jpg — for offline alignment debugging AND
+     * for extracting real-capture fixtures for the engine's regression harness.
+     * Mirrors iOS `dumpFramesForDiagnostics`. Off by default; MainActivity enables it from a
+     * debug-gated `dumpFrames` intent extra.
      */
-    private val dumpFramesForDiagnostics: Boolean = false
+    var dumpFramesForDiagnostics: Boolean = false
+
+    /** Where diagnostic frame dumps go (set by the activity to filesDir/diag). */
+    var diagDirectory: java.io.File? = null
+
+    /**
+     * Develop + dump a RAW burst's frames WITHOUT consuming the one-shot payload holder (the
+     * normal pipeline re-develops them — acceptable double work behind a debug flag). JPEG q95
+     * at the batch working resolution: the same inputs the align/stack stages see.
+     */
+    private fun dumpDiagFrames(
+        payloadRef: java.util.concurrent.atomic.AtomicReference<CapturedBurst.Payload?>,
+        mode: StackMode,
+        frameCount: Int,
+        encode: (ByteArray, Int, Int, ImageEncoder.Format, Double, ImageEncoder.ExifMetadata?) -> ByteArray
+    ) {
+        val dir = diagDirectory ?: return
+        val frames = (payloadRef.get() as? CapturedBurst.Payload.Raw)?.frames ?: return
+        val resolution = achievableWorkingResolution(
+            budgetEdge     = heapAwareWorkingResolution(frameCount = frameCount),
+            sourceLongEdge = peekRawLongEdge(payloadRef) / 2
+        )
+        val developed = Pipeline.developedFrames(frames, binnedDevelop = true, workingResolution = resolution)
+        val out = java.io.File(dir, "${mode.storageKey}-${System.currentTimeMillis()}")
+        out.mkdirs()
+        developed.forEachIndexed { i, img ->
+            val rgba = OutputTransform.encodeSRGB8(img)
+            java.io.File(out, "frame-%02d.jpg".format(i)).writeBytes(
+                encode(rgba, img.width, img.height, ImageEncoder.Format.JPEG, 0.95, null)
+            )
+        }
+    }
 
     /**
      * Long edge of a RAW burst's mosaic frames, peeked WITHOUT consuming the one-shot holder.
@@ -758,6 +792,8 @@ class StackCaptureCoordinator(
 
         val result: PixelImage
         var referencePixels: PixelImage? = null   // the aligned anchor; null when !mode.supportsBlendReference
+
+        if (dumpFramesForDiagnostics) dumpDiagFrames(payloadRef, mode, frameCount, encode)
 
         when (payloadRef.get()) {
             is CapturedBurst.Payload.Raw -> {
