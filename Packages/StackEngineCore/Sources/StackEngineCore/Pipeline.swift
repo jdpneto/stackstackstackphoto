@@ -1,11 +1,12 @@
 import simd
 
 public enum Pipeline {
-    /// Align a burst to its sharpest frame (shared by every look). Luminance is computed once
-    /// per frame and reused for reference selection AND per-frame alignment.
-    static func alignedStack(_ imgs: [PixelImage], searchRange: Int) -> [PixelImage] {
+    /// Align a burst to its sharpest frame (shared by every look). Returns the aligned frames AND
+    /// the index of the reference (sharpest) frame so callers can retrieve it without recomputing.
+    /// Luminance is computed once per frame and reused for reference selection AND per-frame alignment.
+    static func alignedStackWithRefIdx(_ imgs: [PixelImage], searchRange: Int) -> (aligned: [PixelImage], refIdx: Int) {
         precondition(!imgs.isEmpty)
-        if imgs.count == 1 { return imgs }
+        if imgs.count == 1 { return (imgs, 0) }
         let w = imgs[0].width, h = imgs[0].height
         precondition(imgs.allSatisfy { $0.width == w && $0.height == h }, "all images must be the same size")
         // Luma per frame is reused for reference selection. Alignment is per-frame independent → cores.
@@ -18,7 +19,7 @@ public enum Pipeline {
         // residuals so the fit locks onto the static background and ignores genuinely-moving regions.
         let refSmall = downscaleOne(imgs[refIdx], maxEdge: alignmentEstimateEdge)
         let factor = Float(w) / Float(refSmall.width)
-        return parallelMap(Array(imgs.indices)) { i -> PixelImage in
+        let aligned = parallelMap(Array(imgs.indices)) { i -> PixelImage in
             if i == refIdx { return imgs[i] }
             let movSmall = downscaleOne(imgs[i], maxEdge: alignmentEstimateEdge)
             let ts = AffineAligner.estimate(reference: refSmall, moving: movSmall,
@@ -26,6 +27,13 @@ public enum Pipeline {
             let t = Transform2D(a: ts.a, b: ts.b, c: ts.c, d: ts.d, tx: ts.tx * factor, ty: ts.ty * factor)
             return AffineAligner.warp(imgs[i], by: t)
         }
+        return (aligned, refIdx)
+    }
+
+    /// Align a burst to its sharpest frame. Wrapper over `alignedStackWithRefIdx` for callers that
+    /// don't need the reference index.
+    static func alignedStack(_ imgs: [PixelImage], searchRange: Int) -> [PixelImage] {
+        alignedStackWithRefIdx(imgs, searchRange: searchRange).aligned
     }
 
     /// Long-edge (px) the similarity transform is estimated at. Rotation/scale are resolution-
@@ -36,12 +44,37 @@ public enum Pipeline {
     /// treated as "moves differently from the global motion" and down-weighted.
     static let alignmentRobustClip: Float = 0.02
 
+    /// Align then apply the look's reducer, ALSO returning the aligned reference (sharpest) frame —
+    /// the second endpoint of the editor's blend-strength lerp. (spec 2026-06-11 §3)
+    public static func reduceImagesWithReference(_ imgs: [PixelImage], mode: StackMode, searchRange: Int = 8,
+                                                 workingResolution: Int? = nil) -> (result: PixelImage, reference: PixelImage) {
+        let (aligned, refIdx) = alignedStackWithRefIdx(downscale(imgs, maxEdge: workingResolution), searchRange: searchRange)
+        let result = reduceAligned(aligned, mode: mode)
+        // The blend endpoints must share the look's exposure — α trades noise, not brightness.
+        // For lowLightBoost the result is a gain-boosted mean; scale the reference by the same gain
+        // so α=0 (reference) and α=1 (result) sit at the same perceptual brightness.
+        let rawRef = aligned[refIdx]
+        let reference: PixelImage
+        if mode == .lowLightBoost {
+            let gain = StackReducer.defaultLowLightGain
+            reference = PixelImage(width: rawRef.width, height: rawRef.height,
+                                   pixels: rawRef.pixels.map { $0 * gain })
+        } else {
+            reference = rawRef
+        }
+        return (result, reference)
+    }
+
     /// Align then apply the look's reducer. `workingResolution` (long-edge px, nil = full) downscales
     /// the developed frames before align/stack — the dominant lever for on-device speed + memory,
     /// since alignment and stacking cost scale with pixel count.
     public static func reduceImages(_ imgs: [PixelImage], mode: StackMode, searchRange: Int = 8,
                                     workingResolution: Int? = nil) -> PixelImage {
-        let aligned = alignedStack(downscale(imgs, maxEdge: workingResolution), searchRange: searchRange)
+        reduceImagesWithReference(imgs, mode: mode, searchRange: searchRange, workingResolution: workingResolution).result
+    }
+
+    /// Shared reducer dispatch over an already-aligned stack.
+    private static func reduceAligned(_ aligned: [PixelImage], mode: StackMode) -> PixelImage {
         switch mode {
         case .noiseReduction: return StackReducer.sigmaClippedMean(aligned) // kappa fixed at 2.0; use noiseReductionImages for an explicit kappa
         case .smoothMotion:   return StackReducer.mean(aligned)              // aligned mean is sharp where static, blurred where moving
@@ -126,6 +159,36 @@ public enum Pipeline {
         return MotionComposite.blend(staticBase: base, effect: streaks, mask: mask)
     }
 
+    /// End-to-end streaming stack for the long-exposure looks, ALSO returning the anchor (frame 0 at
+    /// working resolution) — it is already held alive for alignment; returning it costs nothing.
+    /// (spec 2026-06-11 §3)
+    public static func reduceStreamingWithReference(_ frames: [RawSensorFrame], mode: StackMode,
+                                                    searchRange: Int = 8, workingResolution: Int? = nil,
+                                                    binnedDevelop: Bool = true,
+                                                    shouldCancel: () -> Bool = { false }) throws -> (result: PixelImage, reference: PixelImage) {
+        precondition(!frames.isEmpty, "need at least one frame")
+        if shouldCancel() { throw CancellationError() }
+        precondition(mode.isLongExposure, "reduceStreamingWithReference supports long-exposure looks only (.smoothMotion / .lightTrails)")
+        func develop(_ i: Int) -> PixelImage {
+            let d = binnedDevelop ? ColorPipeline.processBinned(frames[i]) : ColorPipeline.process(frames[i])
+            guard let maxEdge = workingResolution else { return d }
+            return downscaleOne(d, maxEdge: maxEdge)
+        }
+        let anchor = develop(0)                                      // anchor, kept for the whole run
+        let refSmall = downscaleOne(anchor, maxEdge: alignmentEstimateEdge)
+        let factor = Float(anchor.width) / Float(refSmall.width)
+        let result = try streamingReduce(count: frames.count, mode: mode, shouldCancel: shouldCancel) { i in
+            if i == 0 { return anchor }
+            let moving = develop(i)
+            let movSmall = downscaleOne(moving, maxEdge: alignmentEstimateEdge)
+            let ts = AffineAligner.estimate(reference: refSmall, moving: movSmall,
+                                            translationSearch: searchRange, robustClip: alignmentRobustClip)
+            let t = Transform2D(a: ts.a, b: ts.b, c: ts.c, d: ts.d, tx: ts.tx * factor, ty: ts.ty * factor)
+            return AffineAligner.warp(moving, by: t)
+        }
+        return (result, anchor)
+    }
+
     /// End-to-end streaming stack for the long-exposure looks. Develops each raw frame on demand,
     /// downscales to `workingResolution`, aligns it to the FIRST frame (the anchor — streaming can't
     /// hold all frames to pick the sharpest, and the steadiness gate keeps the burst near one pose),
@@ -135,26 +198,9 @@ public enum Pipeline {
                                        searchRange: Int = 8, workingResolution: Int? = nil,
                                        binnedDevelop: Bool = true,
                                        shouldCancel: () -> Bool = { false }) throws -> PixelImage {
-        precondition(!frames.isEmpty, "need at least one frame")
-        if shouldCancel() { throw CancellationError() }
-        precondition(mode.isLongExposure, "reduceStreaming supports long-exposure looks only (.smoothMotion / .lightTrails)")
-        func develop(_ i: Int) -> PixelImage {
-            let d = binnedDevelop ? ColorPipeline.processBinned(frames[i]) : ColorPipeline.process(frames[i])
-            guard let maxEdge = workingResolution else { return d }
-            return downscaleOne(d, maxEdge: maxEdge)
-        }
-        let reference = develop(0)                                   // anchor, kept for the whole run
-        let refSmall = downscaleOne(reference, maxEdge: alignmentEstimateEdge)
-        let factor = Float(reference.width) / Float(refSmall.width)
-        return try streamingReduce(count: frames.count, mode: mode, shouldCancel: shouldCancel) { i in
-            if i == 0 { return reference }
-            let moving = develop(i)
-            let movSmall = downscaleOne(moving, maxEdge: alignmentEstimateEdge)
-            let ts = AffineAligner.estimate(reference: refSmall, moving: movSmall,
-                                            translationSearch: searchRange, robustClip: alignmentRobustClip)
-            let t = Transform2D(a: ts.a, b: ts.b, c: ts.c, d: ts.d, tx: ts.tx * factor, ty: ts.ty * factor)
-            return AffineAligner.warp(moving, by: t)
-        }
+        try reduceStreamingWithReference(frames, mode: mode, searchRange: searchRange,
+                                         workingResolution: workingResolution, binnedDevelop: binnedDevelop,
+                                         shouldCancel: shouldCancel).result
     }
 
     /// Diagnostic: the developed + working-resolution frames that `reduceImages` feeds to alignment.

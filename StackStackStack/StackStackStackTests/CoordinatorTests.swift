@@ -275,6 +275,23 @@ final class CoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testHEICFallbackKeepsResultAndReferencePaired() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .smoothMotion                 // a look that stores a reference
+        coord.exportFormat = .heic
+        coord.encodeImage = { rgba, w, h, format, quality in
+            if format == .heic { throw ImageEncoderError.finalizeFailed }
+            return try ImageEncoder.encode(rgba8: rgba, width: w, height: h, format: format, quality: quality)
+        }
+        await coord.shoot()
+        await coord.awaitProcessing()
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(rec.encoderFormat, .jpeg)
+        let ref = try XCTUnwrap(store.referenceData(for: rec.id), "reference must survive the fallback, paired as JPEG")
+        XCTAssertEqual(ref.prefix(3), Data([0xFF, 0xD8, 0xFF]), "reference encoded in the shared fallback format")
+    }
+
+    @MainActor
     func testDefaultFormatIsJPEG() async throws {
         let (coord, store) = makeCoordinator()
         await coord.shoot()
@@ -322,6 +339,28 @@ final class CoordinatorTests: XCTestCase {
         let (coord, _) = makeCoordinator()
         _ = await coord.startPreview()
         XCTAssertTrue(coord.supportsRAW)
+    }
+
+    // MARK: - Task 2 (blend-strength) tests
+
+    @MainActor
+    func testShootSavesAReferenceForBlendableLooks() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .smoothMotion
+        await coord.shoot()
+        await coord.awaitProcessing()
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertNotNil(store.referenceData(for: rec.id), "long-exposure looks store the blend reference")
+    }
+
+    @MainActor
+    func testDepthShootSavesNoReference() async throws {
+        let (coord, store) = makeCoordinator()
+        coord.mode = .depthOfField
+        await coord.shoot()
+        await coord.awaitProcessing()
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertNil(store.referenceData(for: rec.id), "no blend semantics for focus stacks")
     }
 }
 

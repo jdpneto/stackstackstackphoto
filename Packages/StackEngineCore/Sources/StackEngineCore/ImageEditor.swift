@@ -4,6 +4,20 @@ import simd
 public enum ImageEditor {
     private static let pivot: Float = 0.18   // 18% linear mid-grey
 
+    /// Apply adjustments with an optional aligned reference for the blend-strength lerp
+    /// (out = α·img + (1−α)·reference, linear light, BEFORE geometry/tonal so the reference
+    /// needs no separate geometry pass). Missing/mismatched reference skips the blend. (spec §3)
+    public static func apply(_ adj: ImageAdjustments, to img: PixelImage, reference: PixelImage?) -> PixelImage {
+        var base = img
+        if adj.hasBlend, let ref = reference, ref.width == img.width, ref.height == img.height {
+            let a = max(0, min(1, adj.blendStrength))
+            for i in 0..<base.pixels.count {
+                base.pixels[i] = img.pixels[i] * a + ref.pixels[i] * (1 - a)
+            }
+        }
+        return apply(adj, to: base)
+    }
+
     /// Apply all adjustments: geometry (straighten → crop) then tonal (exposure → WB → contrast →
     /// shadows/highlights), clamped ≥ 0 (design §14).
     public static func apply(_ adj: ImageAdjustments, to img: PixelImage) -> PixelImage {

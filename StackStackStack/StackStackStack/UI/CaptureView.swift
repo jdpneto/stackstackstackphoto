@@ -24,6 +24,7 @@ struct CaptureView: View {
     private struct EditSource: Identifiable {
         let id: UUID
         let original: Data
+        let reference: Data?   // aligned reference frame for blend-strength (nil → slider hidden)
         let adjustments: ImageAdjustments
         let preview: UIImage?
         let format: ImageEncoder.Format
@@ -93,7 +94,8 @@ struct CaptureView: View {
             if !locked, focusIndicator?.locked == true { focusIndicator = nil }
         }
         .sheet(item: $editSource) { src in
-            EditorView(originalJPEG: src.original, initialAdjustments: src.adjustments,
+            EditorView(originalJPEG: src.original, referenceJPEG: src.reference,
+                       initialAdjustments: src.adjustments,
                        initialPreview: src.preview, recordId: src.id, recordFormat: src.format,
                        store: coordinator.library) { renderedJPEG in
                 lastResult = UIImage(data: renderedJPEG)   // reflect the edit directly — no disk read
@@ -107,16 +109,18 @@ struct CaptureView: View {
         guard let id = coordinator.lastSavedID else { return }
         let lib = coordinator.library
         Task {
-            let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, ImageAdjustments, Data?, ImageEncoder.Format)? in
+            let loaded = await Task.detached(priority: .userInitiated) { () -> (Data, Data?, ImageAdjustments, Data?, ImageEncoder.Format)? in
                 // Use the record's own format (spec §4: WYSIWYG; never the current setting).
                 let fmt = lib.record(for: id)?.encoderFormat ?? .jpeg
                 guard let data = lib.originalData(for: id) else { return nil }
+                let ref = lib.referenceData(for: id)   // nil for depth + pre-this-PR records
                 let adj = lib.adjustments(for: id)
-                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200, format: fmt)
-                return (data, adj, prev, fmt)
+                let prev = ResultRenderer.render(originalJPEG: data, adjustments: adj, quality: 0.85, maxPixel: 1200,
+                                                 format: fmt, referenceJPEG: ref)
+                return (data, ref, adj, prev, fmt)
             }.value
-            guard let (data, adj, prevData, fmt) = loaded else { return }
-            editSource = EditSource(id: id, original: data, adjustments: adj,
+            guard let (data, ref, adj, prevData, fmt) = loaded else { return }
+            editSource = EditSource(id: id, original: data, reference: ref, adjustments: adj,
                                     preview: prevData.flatMap { UIImage(data: $0) }, format: fmt)
         }
     }
