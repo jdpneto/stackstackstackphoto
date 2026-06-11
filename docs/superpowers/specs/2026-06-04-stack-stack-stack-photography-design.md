@@ -238,6 +238,8 @@ Because full-res source frames are discarded after stacking:
 
 This limitation must be communicated honestly in the editor UI ("Previewing on a draft — re-shoot for full quality at this strength").
 
+> **Status (2026-06-11):** superseded for α — the app stores the aligned reference and applies blend strength at full quality (see 2026-06-11-blend-strength-design.md); the proxy-stack mechanism was not built.
+
 ---
 
 ## 10. Capture engine

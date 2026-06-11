@@ -11,7 +11,7 @@
 
 1. **Depth of Field — DONE (PR #30).** Shipped end-to-end: chain alignment (adjacent-bracket links + bounds), lensPosition focus sweep, Depth chip + Near/Far Pro controls, capability gating, real-bracket regression fixture.
 2. **Settings + Onboarding — DONE (PR #31).** Third tab (save-to-Photos, JPEG/HEIC capture-time format, storage, capability report, replay intro, about) + first-launch onboarding. Still missing from §15.6 by design: RAW toggle, grid/level, max session length (see the bible's §15.6 status note).
-3. **No proxy stack → no blend-strength (α) re-tuning.** The low-res aligned proxy frames (§9.2), the recipe's `blendStrength`/`modeParams`/`referenceFrameIndex` (§9.1), the `out = α·reduced + (1−α)·reference` engine entry point (§13.3), and the "previewing on a draft" editor flow (§9.3, §14) are all absent.
+3. **Blend strength — DONE (this PR, as a full-quality edit).** Deviation: no proxy stack — the working-res aligned reference is stored (`<uuid>.ref.<ext>`) and α is an ImageAdjustments field applied at full resolution (lerp needs the endpoints, not the reducer). Re-tuning other capture params stays out of scope (§9.3).
 4. **No capture-time safeguards:** no thermal monitoring (`ProcessInfo.thermalState`), no low-battery check, no storage-full pre-flight, no metering guidance, no YUV/HEIC fallback on non-RAW devices (capture just throws `CaptureError.noRawFormat`). (§5.3, §10.2, §16, §17)
 5. **No golden-image corpus.** Unit tests are strong (engine + app), but the cross-platform divergence guardrail of §18 — shared RAW sequences, reference outputs, PSNR/SSIM/ΔE tolerances in CI — does not exist. SSIM and ΔE metrics are unimplemented (`Metrics.swift` has PSNR and maxAbsDiff only). This becomes load-bearing the day Android starts.
 6. **The Stack record is minimal.** `StackRecord` persists `id, createdAt, mode, frameCount, resultFileName, updatedAt` — none of the §9.1 capture metadata (per-frame ISO/shutter/lensPosition/timestamps, sensor info, rawUsed), result metadata, recipe, or EXIF. Output JPEGs carry no EXIF or ICC profile.
@@ -23,14 +23,14 @@
 | Design section | Status | Summary |
 |---|---|---|
 | §4 Auto/Pro tiers | Partial | Pro tray exists (ISO/shutter/focus/frame count); Auto is fixed recipes, not scene-adaptive; WB/histogram/grid/level/blend-strength missing |
-| §9 Data model & storage | Partial | Result + immutable original + edits sidecar persisted; proxy stack, recipe, capture metadata, EXIF, persisted thumbnails missing |
+| §9 Data model & storage | Partial | Result + immutable original + aligned reference (`<uuid>.ref.<ext>`) + edits sidecar persisted; proxy stack (unused — α uses the working-res reference instead), recipe, capture metadata, EXIF, persisted thumbnails missing |
 | §10 Capture engine | Partial | RAW burst, locks, pacing, 60s cap, steadiness gating done; no YUV fallback, no scene-adaptive Auto, no DoF sweep |
 | §11 Alignment | Partial | Deterministic pyramid similarity (Hooke–Jeeves SSD) done; no local/tiled refinement, no inlier-based frame dropping, bilinear (not bicubic) warp |
 | §12 Color pipeline | Partial | Linearize/WB/color-matrix done; demosaic is provisional bilinear (not the pinned Malvar–He–Cutler); output is sRGB-only, no P3/rolloff/filmic, no ICC/EXIF |
 | §13.1 Noise reduction | Mostly done | Sigma-clipped mean + median fallback done; κ not coupled to N; no optional unsharp mask |
 | §13.2 Depth of field | Done (PR #30) | Shipped end-to-end (engine, capture, UI, chain alignment, capability gating) |
-| §13.3 Long exposure | Done (improved) | Mean / lighten / boosted-mean reducers + streaming accumulation done; light trails upgraded to motion-masked composite (deliberate deviation); no α blend |
-| §14 Editor | Mostly done | Non-destructive EV/contrast/WB/shadows/highlights/crop/straighten (+90° rotate) done; no tone curve control; no proxy blend preview |
+| §13.3 Long exposure | Done (improved) | Mean / lighten / boosted-mean reducers + streaming accumulation done; light trails upgraded to motion-masked composite (deliberate deviation); α blend done (full-quality, stored reference) |
+| §14 Editor | Mostly done | Non-destructive EV/contrast/WB/shadows/highlights/crop/straighten (+90° rotate) + blend-strength slider (full-quality lerp) done; no tone curve control |
 | §15 UX screens | Mostly done | Capture + Gallery + detail/editor + Settings + Onboarding; processing/gallery chrome gaps remain |
 | §16 Performance/thermal | Partial | Streaming reducers + managed working resolution (2400px) done; **engine is CPU/SIMD, not Metal**; no thermal/battery policy; no perf regression gates |
 | §17 Error handling | Partial | Permission/no-RAW/no-frames/cancel handled; alignment-failure messaging, storage/thermal/battery/metering responses missing |
@@ -150,6 +150,7 @@ The doc's own rule: "Where code and this document disagree, raise it — do not 
 7. Processing happens in the background behind continued shooting rather than a modal processing screen (§15.3).
 8. Survivors<3 fallback = clipped mean, not median (§13.1).
 9. sRGB piecewise output curve vs. "gamma 2.2 + rolloff" (§12.3) — until P3/rolloff lands, pin whichever is intended.
+10. Blend strength α = full-quality lerp against a stored aligned reference, not the §9.2 proxy-stack draft preview.
 
 ---
 
