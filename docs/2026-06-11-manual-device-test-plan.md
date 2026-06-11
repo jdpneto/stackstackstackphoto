@@ -16,7 +16,7 @@
 | D12 | EXIF/ICC | PASS — on-device HEIC carries ISO 400, 1/60s, correct DateTimeOriginal, Software tag, embedded sRGB; index.json records iso/shutter. |
 | E13 | All-looks sweep | PASS — Detail, Smooth, Trails, Night, Depth all captured + saved on the Release build. |
 
-**Open findings for a follow-up fix:** (1) onboarding camera-page buttons clipped in landscape; (2) page-dots/text overlap.
+**Open findings:** both FIXED in PR #36 (compact-height scaffold + page-dot clearance), device-verified in both orientations.
 **Remaining for David:** Photos denied path, Delete All, opportunistic thermal/battery/storage-full, non-RAW hardware someday.
 
 
