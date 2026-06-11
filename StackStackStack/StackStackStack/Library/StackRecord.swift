@@ -15,6 +15,11 @@ struct StackRecord: Codable, Identifiable, Equatable {
     /// stable contract (same rule as StackMode raw values).
     var format: String?
 
+    /// First-frame ISO speed from the capture burst (nil for legacy records). Optional for back-compat.
+    var iso: Double?
+    /// First-frame exposure time in seconds from the capture burst (nil for legacy records). Optional for back-compat.
+    var shutterSeconds: Double?
+
     /// The record's encoder format; nil/unknown = JPEG (every pre-format record is a JPEG).
     var encoderFormat: ImageEncoder.Format { format.flatMap(ImageEncoder.Format.init(rawValue:)) ?? .jpeg }
 

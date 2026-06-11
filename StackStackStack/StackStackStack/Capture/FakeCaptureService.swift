@@ -17,7 +17,7 @@ struct FakeCaptureService: CaptureService {
                       onProgress: (@Sendable (Int) -> Void)?) async throws -> CapturedBurst {
         await Task.yield()   // model a non-instant capture so the shutter's re-entrancy guard applies
         if let sweep = recipe.focusSweep {
-            return .raw(focusBrackets(steps: sweep.positions.count, onProgress: onProgress))
+            return CapturedBurst(payload: .raw(focusBrackets(steps: sweep.positions.count, onProgress: onProgress)), info: nil)
         }
         let n = max(recipe.frameCount, 1)
         let frames = (0..<n).map { k -> RawSensorFrame in
@@ -39,7 +39,7 @@ struct FakeCaptureService: CaptureService {
             onProgress?(k + 1)
             return frame
         }
-        return .raw(frames)
+        return CapturedBurst(payload: .raw(frames), info: nil)
     }
 
     /// Focus-bracket fake (spec 2026-06-10 §5.5): frame k carries high-amplitude checker texture
