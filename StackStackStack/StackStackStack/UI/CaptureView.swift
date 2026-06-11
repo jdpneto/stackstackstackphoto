@@ -187,7 +187,9 @@ struct CaptureView: View {
             } else if coordinator.lastResultJPEG != nil {
                 Text(coordinator.photosExportNote.map { "Saved ✓ · \($0)" } ?? "Saved ✓")
             } else {
-                Text("Ready")
+                // Show any system-condition advisory (thermal/battery) alongside "Ready".
+                // (spec 2026-06-11 §2: note visible on the Ready state)
+                Text(coordinator.environmentNote.map { "Ready · \($0)" } ?? "Ready")
             }
         }.foregroundColor(.white).padding(.horizontal)
     }

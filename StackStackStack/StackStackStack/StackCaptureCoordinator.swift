@@ -54,6 +54,12 @@ final class StackCaptureCoordinator: ObservableObject {
     var photosExporter: @Sendable (Data, ImageEncoder.Format) async throws -> Void = PhotoLibraryExporter.export
     /// Non-blocking note when a Photos export fails (the in-app save already succeeded). (spec §5)
     @Published private(set) var photosExportNote: String?
+    /// System-condition advisory shown on the capture screen (thermal warning, low-battery note);
+    /// nil when conditions are nominal. Recomputed at each shutter press. (spec 2026-06-11 §2)
+    @Published private(set) var environmentNote: String?
+    /// System environment probed at shutter press; injectable so tests can simulate thermal/battery/disk
+    /// states the simulator can't produce. (spec 2026-06-11 §2)
+    var environment: CaptureEnvironment = .live()
     /// Injectable encode — tests can swap this to force an encoder failure and exercise the HEIC→JPEG
     /// fallback path without touching the real ImageEncoder. (spec §8)
     var encodeImage: @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data =
@@ -107,6 +113,24 @@ final class StackCaptureCoordinator: ObservableObject {
     /// Capture a burst (foreground, fast), then queue the heavy processing in the background.
     func shoot() async {
         guard !isBusy else { return }   // reject a rapid double-tap, and a shot during the background stack
+
+        // Environment policy (spec 2026-06-11 §2): hard blocks first, then advisory notes.
+        // These guards run AFTER the isBusy check and BEFORE the per-shot clears so that a blocked
+        // shot sets lastError and returns without touching the rest of the published state.
+        let thermal = environment.thermalState()
+        if thermal == .critical { lastError = "Too hot — let the phone cool down."; return }
+        if environment.freeDiskBytes() < CaptureEnvironment.minimumFreeBytes {
+            lastError = "Not enough storage to capture."; return
+        }
+        let battery = environment.batteryLevel()
+        if battery >= 0 && battery < CaptureEnvironment.lowBatteryThreshold && !environment.batteryCharging() {
+            environmentNote = "Low battery"
+        } else if thermal == .serious {
+            environmentNote = "Device is warm — shorter bursts"
+        } else {
+            environmentNote = nil
+        }
+
         let mode = self.mode                 // capture the selected look/overrides at shutter-press time
         let format = self.exportFormat       // capture the format at shutter-press time
         let exportToPhotos = self.saveToPhotosEnabled   // snapshot the toggle at shutter-press time
@@ -176,16 +200,28 @@ final class StackCaptureCoordinator: ObservableObject {
     /// `burst` (the edge sliders) plus any manual Pro exposure overrides; static looks use the fixed
     /// per-look recipe with the full Pro overrides. Called synchronously from `shoot()` before any
     /// `await`, so `self.pro`/`self.burst` reflect their shutter-press values without a local snapshot.
+    /// When the thermal state is `.serious`, the burst is halved (floor, min 2) so the device cools
+    /// during shorter stacks; sweep steps track frameCount per the established invariant. (spec 2026-06-11 §2)
     /// (design 2026-06-07 §5)
     private func makeRecipe(for mode: StackMode) -> CaptureRecipe {
+        var recipe: CaptureRecipe
         if mode.isLongExposure {
-            return CaptureRecipe(frameCount: burst.photoCount,
-                                 durationSeconds: burst.durationSeconds,
-                                 manualISO: pro.iso.map(Float.init),
-                                 manualShutterSeconds: pro.shutterSeconds,
-                                 manualFocus: pro.focus.map(Float.init))
+            recipe = CaptureRecipe(frameCount: burst.photoCount,
+                                   durationSeconds: burst.durationSeconds,
+                                   manualISO: pro.iso.map(Float.init),
+                                   manualShutterSeconds: pro.shutterSeconds,
+                                   manualFocus: pro.focus.map(Float.init))
+        } else {
+            recipe = CaptureRecipe.recipe(for: mode).applying(pro)
         }
-        return CaptureRecipe.recipe(for: mode).applying(pro)
+        // Thermal throttle: halve the burst when the device is seriously hot so it cools faster.
+        if environment.thermalState() == .serious {
+            recipe.frameCount = max(2, recipe.frameCount / 2)
+            if let s = recipe.focusSweep {
+                recipe.focusSweep = .init(near: s.near, far: s.far, steps: recipe.frameCount)
+            }
+        }
+        return recipe
     }
 
     /// Queue develop→align→stack→encode→save behind any earlier job (serial), running the heavy work
