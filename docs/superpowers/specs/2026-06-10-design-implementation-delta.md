@@ -138,6 +138,11 @@ Engine has: modified-Laplacian 5×5 sharpness, guided-filter-regularized selecti
 
 ---
 
+## Android port status (begun 2026-06-11)
+
+- **Engine (`android/stackengine`) — DONE:** pure Kotlin/JVM 1:1 port of all 26 StackEngineCore files + 144 ported tests. **Golden-corpus parity is bit-exact** (∞ PSNR / SSIM 1.0 / ΔE 0.0 on all five looks vs the SAME committed reference PNGs, mutation-checked), real-bracket heavy tier green (breathing pins 1.030→0.973 hold under javax.imageio decoding). Port spec: `2026-06-11-android-port-design.md`.
+- **App layer (P4–P6)** — pending: Compose UI, Camera2 capture, store/settings/exporter mirrors; emulator-verifiable end-to-end (the emulator exercises the non-RAW fallback genuinely).
+
 ## Deliberate deviations to write back into the Bible
 
 The doc's own rule: "Where code and this document disagree, raise it — do not silently diverge." These look intentional and (mostly) better; amend the spec or consciously revert:
