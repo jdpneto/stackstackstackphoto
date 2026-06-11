@@ -38,7 +38,8 @@ final class LibraryStore: @unchecked Sendable {
     struct SavedStack { let id: UUID; let resultURL: URL }
 
     @discardableResult
-    func save(result: Data, reference: Data? = nil, format: ImageEncoder.Format, mode: String, frameCount: Int) throws -> SavedStack {
+    func save(result: Data, reference: Data? = nil, format: ImageEncoder.Format, mode: String,
+              frameCount: Int, iso: Double? = nil, shutterSeconds: Double? = nil) throws -> SavedStack {
         let id = UUID()
         let fileName = "\(id.uuidString).\(format.fileExtension)"
         let url = root.appendingPathComponent(fileName)
@@ -55,7 +56,8 @@ final class LibraryStore: @unchecked Sendable {
         }
         var records = (try? loadRaw()) ?? []
         records.insert(StackRecord(id: id, createdAt: now, mode: mode, frameCount: frameCount,
-                                   resultFileName: fileName, updatedAt: now, format: format.rawValue), at: 0)
+                                   resultFileName: fileName, updatedAt: now, format: format.rawValue,
+                                   iso: iso, shutterSeconds: shutterSeconds), at: 0)
         try persist(records)
         return SavedStack(id: id, resultURL: url)
     }

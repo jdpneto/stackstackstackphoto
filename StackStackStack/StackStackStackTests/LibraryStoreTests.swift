@@ -154,6 +154,27 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertNil(store.record(for: UUID()))
     }
 
+    // MARK: - Task 1: iso/shutterSeconds on StackRecord
+
+    func testCaptureInfoPersistsAndLegacyDecodesNil() throws {
+        let store = makeStore()
+        let saved = try store.save(result: Data([0xAA]), reference: nil, format: .jpeg,
+                                   mode: "noiseReduction", frameCount: 3, iso: 250, shutterSeconds: 0.008)
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(rec.iso, 250)
+        XCTAssertEqual(rec.shutterSeconds ?? 0, 0.008, accuracy: 1e-9)
+        // Strip the new keys from index.json (legacy-record pattern) → fields decode as nil.
+        let indexURL = storeRoot().appendingPathComponent("index.json")
+        var json = try JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as! [[String: Any]]
+        json[0].removeValue(forKey: "iso")
+        json[0].removeValue(forKey: "shutterSeconds")
+        try JSONSerialization.data(withJSONObject: json).write(to: indexURL)
+        let legacy = try XCTUnwrap(store.loadAll().first)
+        XCTAssertNil(legacy.iso, "iso absent from JSON must decode as nil")
+        XCTAssertNil(legacy.shutterSeconds, "shutterSeconds absent from JSON must decode as nil")
+        _ = saved
+    }
+
     // MARK: - Task 2 (blend-strength) tests
 
     func testReferenceRoundTripAndDeletion() throws {
