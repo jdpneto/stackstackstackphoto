@@ -409,9 +409,59 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(try store.loadAll().count, 1, "low battery never blocks")
         XCTAssertEqual(coord.environmentNote, "Low battery")
     }
+
+    // MARK: - Task 2 (CapturedBurst / non-RAW fallback) tests
+
+    @MainActor
+    func testDevelopedBurstSavesForStaticAndLongExposure() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = LibraryStore(rootDirectory: dir)
+        let coord = StackCaptureCoordinator(capture: DevelopedFake(width: 16, height: 16, count: 20), store: store)
+        for mode in [StackMode.noiseReduction, .smoothMotion] {
+            coord.mode = mode
+            await coord.shoot()
+            await coord.awaitProcessing()
+            XCTAssertNil(coord.lastError, "\(mode)")
+        }
+        XCTAssertEqual(try store.loadAll().count, 2)
+        // Blendable look on the fallback path still stores a reference.
+        let smooth = try XCTUnwrap(store.loadAll().first { $0.mode == "smoothMotion" })
+        XCTAssertNotNil(store.referenceData(for: smooth.id))
+    }
+
+    @MainActor
+    func testDevelopedBurstDepthSaves() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = LibraryStore(rootDirectory: dir)
+        let coord = StackCaptureCoordinator(capture: DevelopedFake(width: 24, height: 16, count: 10), store: store)
+        coord.mode = .depthOfField
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNil(coord.lastError)
+        XCTAssertEqual(try store.loadAll().first?.mode, "depthOfField")
+    }
 }
 
 // MARK: - Helpers
+
+/// Fallback-path fake: returns already-developed frames, as a non-RAW device's HEIC path would.
+private struct DevelopedFake: CaptureService {
+    let width: Int, height: Int, count: Int
+    func startPreview() async -> CALayer? { nil }
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> CapturedBurst {
+        await Task.yield()
+        let n = min(recipe.frameCount, count)
+        let imgs = (0..<n).map { k -> PixelImage in
+            var img = PixelImage(width: width, height: height, fill: SIMD3<Float>(0.4, 0.4, 0.4))
+            img[k % width, 0] = SIMD3<Float>(0.9, 0.9, 0.9)   // per-frame variation
+            onProgress?(k + 1)
+            return img
+        }
+        return .developed(imgs)
+    }
+    var supportsRAWCapture: Bool { false }
+}
 
 private actor ExportLog {
     private(set) var count = 0

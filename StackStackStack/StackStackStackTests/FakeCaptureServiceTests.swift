@@ -6,7 +6,8 @@ import StackEngineCore
 final class FakeCaptureServiceTests: XCTestCase {
     func testFakeReturnsRecipeFrameCount() async throws {
         let svc = FakeCaptureService(width: 8, height: 8)
-        let frames = try await svc.captureBurst(recipe: CaptureRecipe(frameCount: 5, durationSeconds: 1))
+        let burst = try await svc.captureBurst(recipe: CaptureRecipe(frameCount: 5, durationSeconds: 1))
+        guard case .raw(let frames) = burst else { XCTFail("expected .raw burst"); return }
         XCTAssertEqual(frames.count, 5)
         XCTAssertEqual(frames[0].width, 8)
         let img = ColorPipeline.process(frames[0])
@@ -15,7 +16,8 @@ final class FakeCaptureServiceTests: XCTestCase {
 
     func testMotionMakesLightTrailsBrighterThanSmoothMotion() async throws {
         let svc = FakeCaptureService(width: 32, height: 32)
-        let frames = try await svc.captureBurst(recipe: CaptureRecipe(frameCount: 16, durationSeconds: 1))
+        let burst = try await svc.captureBurst(recipe: CaptureRecipe(frameCount: 16, durationSeconds: 1))
+        guard case .raw(let frames) = burst else { XCTFail("expected .raw burst"); return }
         let trails = Pipeline.reduce(frames, mode: .lightTrails)    // per-channel max → bright streak
         let smooth = Pipeline.reduce(frames, mode: .smoothMotion)   // mean → faint blur
 
@@ -32,7 +34,8 @@ final class FakeCaptureServiceTests: XCTestCase {
     func testFocusSweepRecipeProducesDistinctOrderedBrackets() async throws {
         let svc = FakeCaptureService(width: 32, height: 16)
         let recipe = CaptureRecipe.recipe(for: .depthOfField).applying(ProControls(frameCount: 4))
-        let frames = try await svc.captureBurst(recipe: recipe)
+        let burst = try await svc.captureBurst(recipe: recipe)
+        guard case .raw(let frames) = burst else { XCTFail("expected .raw burst"); return }
         XCTAssertEqual(frames.count, 4)
         // Each bracket is sharp in a different band → mosaics must differ pairwise.
         for i in 0..<frames.count {

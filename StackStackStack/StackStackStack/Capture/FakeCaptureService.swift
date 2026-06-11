@@ -14,13 +14,13 @@ struct FakeCaptureService: CaptureService {
     func startPreview() async -> CALayer? { nil }
 
     func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
-                      onProgress: (@Sendable (Int) -> Void)?) async throws -> [RawSensorFrame] {
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> CapturedBurst {
         await Task.yield()   // model a non-instant capture so the shutter's re-entrancy guard applies
         if let sweep = recipe.focusSweep {
-            return focusBrackets(steps: sweep.positions.count, onProgress: onProgress)
+            return .raw(focusBrackets(steps: sweep.positions.count, onProgress: onProgress))
         }
         let n = max(recipe.frameCount, 1)
-        return (0..<n).map { k in
+        let frames = (0..<n).map { k -> RawSensorFrame in
             var mosaic = [UInt16](repeating: 0, count: width * height)
             // Dim, slightly noisy static background.
             for y in 0..<height { for x in 0..<width {
@@ -39,6 +39,7 @@ struct FakeCaptureService: CaptureService {
             onProgress?(k + 1)
             return frame
         }
+        return .raw(frames)
     }
 
     /// Focus-bracket fake (spec 2026-06-10 §5.5): frame k carries high-amplitude checker texture

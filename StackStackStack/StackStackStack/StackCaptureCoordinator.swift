@@ -162,17 +162,17 @@ final class StackCaptureCoordinator: ObservableObject {
         let progress: @Sendable (Int) -> Void = { [weak self] n in
             Task { @MainActor in self?.capturedCount = n }
         }
-        let frames: [RawSensorFrame]
+        let burst: CapturedBurst
         do {
-            frames = try await capture.captureBurst(recipe: recipe, isSteady: gating, onProgress: progress)
+            burst = try await capture.captureBurst(recipe: recipe, isSteady: gating, onProgress: progress)
         } catch {
             lastError = error.localizedDescription
             isCapturing = false
             return
         }
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
-        guard !frames.isEmpty else { lastError = "No frames were captured."; return }
-        enqueueProcessing(frames: frames, mode: mode, format: format,
+        guard !burst.isEmpty else { lastError = "No frames were captured."; return }
+        enqueueProcessing(burst: burst, mode: mode, format: format,
                           orientationQuarterTurns: orientationTurns, exportToPhotos: exportToPhotos,
                           encode: encode)
     }
@@ -226,7 +226,7 @@ final class StackCaptureCoordinator: ObservableObject {
 
     /// Queue develop→align→stack→encode→save behind any earlier job (serial), running the heavy work
     /// off the MainActor, then publish the result. The shutter stays free meanwhile.
-    private func enqueueProcessing(frames: [RawSensorFrame], mode: StackMode,
+    private func enqueueProcessing(burst: CapturedBurst, mode: StackMode,
                                    format: ImageEncoder.Format, orientationQuarterTurns: Int,
                                    exportToPhotos: Bool,
                                    encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) {
@@ -245,13 +245,13 @@ final class StackCaptureCoordinator: ObservableObject {
             do {
                 // makeResult handles the HEIC→JPEG fallback internally; the develop+align+stack
                 // pipeline is never re-run on a fallback, only the encode step. (spec §8)
-                let encoded = try await Self.makeResult(from: frames, mode: mode, format: format,
+                let encoded = try await Self.makeResult(from: burst, mode: mode, format: format,
                                                         orientationQuarterTurns: orientationQuarterTurns,
                                                         shouldCancel: { token.isCancelled },
                                                         encode: encode)
                 if token.isCancelled { return }                    // cancelled during processing → discard
                 let saved = try self.store.save(result: encoded.data, reference: encoded.reference,
-                                                format: encoded.format, mode: mode.rawValue, frameCount: frames.count)
+                                                format: encoded.format, mode: mode.rawValue, frameCount: burst.count)
                 // `lastResultJPEG` keeps its historical name; it stores display bytes — ImageIO decodes both JPEG and HEIC.
                 self.lastResultJPEG = encoded.data
                 self.lastSavedID = saved.id
@@ -303,7 +303,7 @@ final class StackCaptureCoordinator: ObservableObject {
     /// used as the blend-strength lerp's second endpoint; nil for depth stacks (no blend semantics)
     /// and when the reference encode itself fails (safe degradation — never loses the main result).
     /// (spec §8, spec 2026-06-11 §3)
-    nonisolated private static func makeResult(from frames: [RawSensorFrame], mode: StackMode,
+    nonisolated private static func makeResult(from burst: CapturedBurst, mode: StackMode,
                                                format: ImageEncoder.Format,
                                                orientationQuarterTurns: Int,
                                                shouldCancel: @escaping @Sendable () -> Bool,
@@ -311,36 +311,61 @@ final class StackCaptureCoordinator: ObservableObject {
         try await Task.detached(priority: .userInitiated) {
             let result: PixelImage
             var referencePixels: PixelImage?   // the aligned anchor — nil when !mode.supportsBlendReference
-            if mode.isLongExposure {
-                // Streaming: one developed+aligned frame in flight at a time; cancellable between frames.
-                let (res, ref) = try Pipeline.reduceStreamingWithReference(frames, mode: mode,
-                                                                           workingResolution: managedWorkingResolution,
-                                                                           binnedDevelop: true, shouldCancel: shouldCancel)
-                result = res
-                referencePixels = ref
-            } else if !mode.supportsBlendReference {
-                // Depth: develop all brackets at the managed depth resolution, then focus-stack.
-                // No blend-strength reference — frames differ by focus, not by time. (spec 2026-06-11 §4)
-                let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
-                                                         workingResolution: depthWorkingResolution)
-                if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
-                if shouldCancel() { throw CancellationError() }
-                guard let stacked = FocusStacker.allInFocus(
-                    developed,
-                    config: DepthConfig(workingResolution: depthWorkingResolution,
-                                        maxFrames: max(frames.count, 1)))
-                else { throw ProcessingError.focusStackFailed }
-                result = stacked
-                referencePixels = nil
-            } else {
-                let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
-                                                         workingResolution: managedWorkingResolution)
-                if shouldCancel() { throw CancellationError() }   // cancel between develop and reduce (static path)
-                if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
-                let (res, ref) = Pipeline.reduceImagesWithReference(developed, mode: mode)
-                result = res
-                referencePixels = ref
+
+            switch burst {
+            case .raw(let frames):
+                // RAW quality path: develop → downscale → align → stack. Verbatim existing logic.
+                if mode.isLongExposure {
+                    // Streaming: one developed+aligned frame in flight at a time; cancellable between frames.
+                    let (res, ref) = try Pipeline.reduceStreamingWithReference(frames, mode: mode,
+                                                                               workingResolution: managedWorkingResolution,
+                                                                               binnedDevelop: true, shouldCancel: shouldCancel)
+                    result = res
+                    referencePixels = ref
+                } else if !mode.supportsBlendReference {
+                    // Depth: develop all brackets at the managed depth resolution, then focus-stack.
+                    // No blend-strength reference — frames differ by focus, not by time. (spec 2026-06-11 §4)
+                    let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
+                                                             workingResolution: depthWorkingResolution)
+                    if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
+                    if shouldCancel() { throw CancellationError() }
+                    guard let stacked = FocusStacker.allInFocus(
+                        developed,
+                        config: DepthConfig(workingResolution: depthWorkingResolution,
+                                            maxFrames: max(frames.count, 1)))
+                    else { throw ProcessingError.focusStackFailed }
+                    result = stacked
+                    referencePixels = nil
+                } else {
+                    let developed = Pipeline.developedFrames(frames, binnedDevelop: true,
+                                                             workingResolution: managedWorkingResolution)
+                    if shouldCancel() { throw CancellationError() }   // cancel between develop and reduce (static path)
+                    if dumpFramesForDiagnostics { dumpDevelopedFrames(developed) }
+                    let (res, ref) = Pipeline.reduceImagesWithReference(developed, mode: mode)
+                    result = res
+                    referencePixels = ref
+                }
+
+            case .developed(let images):
+                // Non-RAW fallback: frames are already at working resolution — skip the develop step
+                // and route every look through the images pipeline. (spec 2026-06-11 §3)
+                if mode == .depthOfField {
+                    guard let stacked = FocusStacker.allInFocus(
+                        images,
+                        config: DepthConfig(workingResolution: depthWorkingResolution,
+                                            maxFrames: max(images.count, 1)))
+                    else { throw ProcessingError.focusStackFailed }
+                    result = stacked
+                    referencePixels = nil
+                } else {
+                    if shouldCancel() { throw CancellationError() }
+                    let (res, ref) = Pipeline.reduceImagesWithReference(images, mode: mode,
+                                                                        workingResolution: managedWorkingResolution)
+                    result = res
+                    referencePixels = mode.supportsBlendReference ? ref : nil
+                }
             }
+
             // All cancellation checks precede the encode — a CancellationError here is from the
             // pipeline above, not the encode, so the where-clause below can't swallow one mid-encode.
             let oriented = ImageGeometry.rotated(result, quarterTurns: orientationQuarterTurns)   // bake upright
