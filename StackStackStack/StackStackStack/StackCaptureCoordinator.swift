@@ -61,9 +61,10 @@ final class StackCaptureCoordinator: ObservableObject {
     /// states the simulator can't produce. (spec 2026-06-11 §2)
     var environment: CaptureEnvironment = .live()
     /// Injectable encode — tests can swap this to force an encoder failure and exercise the HEIC→JPEG
-    /// fallback path without touching the real ImageEncoder. (spec §8)
-    var encodeImage: @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data =
-        { try ImageEncoder.encode(rgba8: $0, width: $1, height: $2, format: $3, quality: $4) }
+    /// fallback path without touching the real ImageEncoder. The last parameter carries optional EXIF
+    /// metadata; the default forwards it to ImageEncoder. (spec §8)
+    var encodeImage: @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double, ImageEncoder.ExifMetadata?) throws -> Data =
+        { try ImageEncoder.encode(rgba8: $0, width: $1, height: $2, format: $3, quality: $4, exif: $5) }
     /// Handheld-steadiness tracker for the long-exposure looks; observed by the capture overlay and
     /// read by the capture gate. (design 2026-06-07 §8)
     let steadiness = MotionSteadiness()
@@ -138,6 +139,9 @@ final class StackCaptureCoordinator: ObservableObject {
         let encode = self.encodeImage        // snapshot the encode hook at shutter-press time
         // UIDevice.current.orientation is main-thread-only; safe here (coordinator is @MainActor, shoot runs on it).
         let orientationTurns = CaptureOrientation.quarterTurns(for: UIDevice.current.orientation)
+        // Capture timestamp at shutter-press time, just like orientation — makeResult is nonisolated/detached,
+        // so it can't access Date() safely relative to the capture moment; pass it in.
+        let capturedAt = Date()
         lastError = nil
         lastResultJPEG = nil                 // drop the previous preview; a new shot is on the way
         photosExportNote = nil               // clear any prior export failure note
@@ -174,8 +178,8 @@ final class StackCaptureCoordinator: ObservableObject {
         isCapturing = false                  // arms-up done — re-enable the shutter immediately
         guard !burst.isEmpty else { lastError = "No frames were captured."; return }
         enqueueProcessing(burst: burst, mode: mode, format: format,
-                          orientationQuarterTurns: orientationTurns, exportToPhotos: exportToPhotos,
-                          encode: encode)
+                          orientationQuarterTurns: orientationTurns, capturedAt: capturedAt,
+                          exportToPhotos: exportToPhotos, encode: encode)
     }
 
     /// Clear the on-screen result preview, returning the capture screen to the live viewfinder.
@@ -230,12 +234,14 @@ final class StackCaptureCoordinator: ObservableObject {
     /// off the MainActor, then publish the result. The shutter stays free meanwhile.
     private func enqueueProcessing(burst: CapturedBurst, mode: StackMode,
                                    format: ImageEncoder.Format, orientationQuarterTurns: Int,
+                                   capturedAt: Date,
                                    exportToPhotos: Bool,
-                                   encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) {
+                                   encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double, ImageEncoder.ExifMetadata?) throws -> Data) {
         processingCount += 1
         let token = CancellationToken()
         activeTokens.append(token)
         let previous = processingTail
+        let info = burst.info    // snapshot the CaptureInfo alongside the frames
         processingTail = Task { [weak self] in
             await previous?.value                                   // serialize behind earlier jobs
             guard let self else { return }
@@ -249,11 +255,13 @@ final class StackCaptureCoordinator: ObservableObject {
                 // pipeline is never re-run on a fallback, only the encode step. (spec §8)
                 let encoded = try await Self.makeResult(from: burst, mode: mode, format: format,
                                                         orientationQuarterTurns: orientationQuarterTurns,
+                                                        capturedAt: capturedAt, info: info,
                                                         shouldCancel: { token.isCancelled },
                                                         encode: encode)
                 if token.isCancelled { return }                    // cancelled during processing → discard
                 let saved = try self.store.save(result: encoded.data, reference: encoded.reference,
-                                                format: encoded.format, mode: mode.rawValue, frameCount: burst.count)
+                                                format: encoded.format, mode: mode.rawValue, frameCount: burst.count,
+                                                iso: info?.iso, shutterSeconds: info?.shutterSeconds)
                 // `lastResultJPEG` keeps its historical name; it stores display bytes — ImageIO decodes both JPEG and HEIC.
                 self.lastResultJPEG = encoded.data
                 self.lastSavedID = saved.id
@@ -308,13 +316,15 @@ final class StackCaptureCoordinator: ObservableObject {
     nonisolated private static func makeResult(from burst: CapturedBurst, mode: StackMode,
                                                format: ImageEncoder.Format,
                                                orientationQuarterTurns: Int,
+                                               capturedAt: Date,
+                                               info: CaptureInfo?,
                                                shouldCancel: @escaping @Sendable () -> Bool,
-                                               encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double) throws -> Data) async throws -> (data: Data, reference: Data?, format: ImageEncoder.Format) {
+                                               encode: @escaping @Sendable ([UInt8], Int, Int, ImageEncoder.Format, Double, ImageEncoder.ExifMetadata?) throws -> Data) async throws -> (data: Data, reference: Data?, format: ImageEncoder.Format) {
         try await Task.detached(priority: .userInitiated) {
             let result: PixelImage
             var referencePixels: PixelImage?   // the aligned anchor — nil when !mode.supportsBlendReference
 
-            switch burst {
+            switch burst.payload {
             case .raw(let frames):
                 // RAW quality path: develop → downscale → align → stack. Verbatim existing logic.
                 if mode.isLongExposure {
@@ -391,21 +401,31 @@ final class StackCaptureCoordinator: ObservableObject {
             let refPair: (pixels: PixelImage, rgba: [UInt8])? = orientedRef.flatMap { ref in
                 refRGBA.map { (ref, $0) }
             }
+            // Build the EXIF metadata for the result encode: ISO/shutter from burst CaptureInfo,
+            // timestamp from the shutter-press Date snapshotted on the MainActor (the same pattern
+            // as orientationQuarterTurns — makeResult is nonisolated/detached so Date() here would
+            // be "encode start", not "capture start"). Reference and fallback encodes share the same
+            // EXIF so the pair is consistent. A nil info produces a nil exif → no EXIF dict written.
+            let exif: ImageEncoder.ExifMetadata? = {
+                guard let info else { return ImageEncoder.ExifMetadata(capturedAt: capturedAt) }
+                return ImageEncoder.ExifMetadata(iso: info.iso, shutterSeconds: info.shutterSeconds,
+                                                 capturedAt: capturedAt)
+            }()
             do {
-                let data = try encode(rgba, oriented.width, oriented.height, format, 0.95)
+                let data = try encode(rgba, oriented.width, oriented.height, format, 0.95, exif)
                 // Encode the reference in the SAME format the result ended up with; wrap in try? so a
                 // reference encode failure never loses the main result. (spec 2026-06-11 §6)
                 let refData = try? refPair.flatMap { pair -> Data? in
-                    try encode(pair.rgba, pair.pixels.width, pair.pixels.height, format, 0.95)
+                    try encode(pair.rgba, pair.pixels.width, pair.pixels.height, format, 0.95, exif)
                 }
                 return (data, refData, format)
             } catch where format == .heic {
                 // HEIC encoder hiccup → re-encode the SAME stacked pixels as JPEG; the pipeline
                 // (develop+align+stack) is never re-run. Both result and reference fall back together
                 // so the pair always shares one format. (spec §8)
-                let data = try encode(rgba, oriented.width, oriented.height, .jpeg, 0.95)
+                let data = try encode(rgba, oriented.width, oriented.height, .jpeg, 0.95, exif)
                 let refData = try? refPair.flatMap { pair -> Data? in
-                    try encode(pair.rgba, pair.pixels.width, pair.pixels.height, .jpeg, 0.95)
+                    try encode(pair.rgba, pair.pixels.width, pair.pixels.height, .jpeg, 0.95, exif)
                 }
                 return (data, refData, .jpeg)
             }

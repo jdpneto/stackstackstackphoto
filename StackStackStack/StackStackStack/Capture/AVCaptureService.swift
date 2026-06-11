@@ -36,6 +36,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
     private let processingQueue = DispatchQueue(label: "com.jdpneto.stackstackstack.capture.processing")
 
     // Touched only on stateQueue.
+    private var burstInfo: CaptureInfo?              // set-once from the first frame; nil = not yet captured
     private var pending: [RawSensorFrame] = []
     private var pendingDeveloped: [PixelImage] = []   // fallback path: HEIC-decoded linear frames
     private var fallbackHEIC = false                  // true when no Bayer RAW format is available
@@ -95,6 +96,7 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
                 self.generation += 1
                 self.pending = []
                 self.pendingDeveloped = []
+                self.burstInfo = nil
                 self.outstanding = 0
                 self.continuation = cont
                 self.remaining = frameCount
@@ -415,16 +417,18 @@ final class AVCaptureService: NSObject, CaptureService, @unchecked Sendable {
         isSteadyCheck = { true }    // release any captured coordinator/MotionSteadiness reference
         onProgress = nil            // release any captured coordinator reference
         sweepPositions = []
+        let info = burstInfo
+        burstInfo = nil
         if fallbackHEIC {
             let imgs = pendingDeveloped
             pendingDeveloped = []
             if imgs.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
-            else { cont.resume(returning: .developed(imgs)) }
+            else { cont.resume(returning: CapturedBurst(payload: .developed(imgs), info: info)) }
         } else {
             let frames = pending
             pending = []
             if frames.isEmpty { cont.resume(throwing: CaptureError.noFramesProduced) }
-            else { cont.resume(returning: .raw(frames)) }
+            else { cont.resume(returning: CapturedBurst(payload: .raw(frames), info: info)) }
         }
     }
 }
@@ -442,6 +446,24 @@ extension AVCaptureService: AVCapturePhotoCaptureDelegate {
             let isFallback = self.fallbackHEIC
             self.outstanding += 1
             self.processingQueue.async {
+                // Extract first-frame CaptureInfo from photo.metadata on processingQueue (where
+                // RAW conversion also runs), then write it to stateQueue set-once (burstInfo == nil
+                // guard). This ensures the EXIF parse doesn't block the AVFoundation callback thread
+                // and doesn't race with the stateQueue's mutable burst state.
+                let extractedInfo: CaptureInfo? = {
+                    guard let exifDict = photo.metadata[kCGImagePropertyExifDictionary as String] as? [String: Any]
+                    else { return nil }
+                    let iso = (exifDict[kCGImagePropertyExifISOSpeedRatings as String] as? [Double])?.first
+                        ?? (exifDict[kCGImagePropertyExifISOSpeedRatings as String] as? [Int]).flatMap { $0.first }.map(Double.init)
+                    let shutter = exifDict[kCGImagePropertyExifExposureTime as String] as? Double
+                    guard iso != nil || shutter != nil else { return nil }
+                    return CaptureInfo(iso: iso, shutterSeconds: shutter)
+                }()
+                if let extractedInfo {
+                    self.stateQueue.async {
+                        if self.burstInfo == nil { self.burstInfo = extractedInfo }   // set-once: first frame wins
+                    }
+                }
                 if isFallback {
                     // Non-RAW fallback: decode HEIC to sRGB RGBA8 at working resolution, then
                     // linearise to PixelImage. A failed decode skips the frame (same as a failed

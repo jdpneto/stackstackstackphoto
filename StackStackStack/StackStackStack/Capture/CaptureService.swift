@@ -1,14 +1,32 @@
 import StackEngineCore
 import QuartzCore
 
-/// What a burst produced: Bayer RAW frames (the quality path) or already-developed images (the
-/// non-RAW "Standard quality" fallback, decoded at working resolution; spec 2026-06-11 §3).
-enum CapturedBurst: Sendable {
-    case raw([RawSensorFrame])
-    case developed([PixelImage])
+/// First-frame capture metadata (EXIF source for the encoded result). All fields are optional;
+/// nil = unavailable (fakes, non-RAW path). Spec 2026-06-11 §1 deviation: first-frame only —
+/// locked-exposure bursts make per-frame metadata redundant.
+struct CaptureInfo: Sendable, Equatable {
+    /// ISO speed from the first frame's EXIF metadata; nil if unavailable.
+    var iso: Double?
+    /// Exposure time in seconds from the first frame's EXIF metadata; nil if unavailable.
+    var shutterSeconds: Double?
+}
+
+/// One burst's output: the frames plus capture metadata from the first frame (locked-exposure
+/// bursts make per-frame metadata redundant — spec 2026-06-11 §1 deviation note).
+struct CapturedBurst: Sendable {
+    /// What a burst produced: Bayer RAW frames (the quality path) or already-developed images (the
+    /// non-RAW "Standard quality" fallback, decoded at working resolution; spec 2026-06-11 §3).
+    enum Payload: Sendable {
+        case raw([RawSensorFrame])
+        case developed([PixelImage])
+    }
+
+    var payload: Payload
+    /// First-frame EXIF metadata; nil for fakes and for non-RAW paths that don't vend EXIF.
+    var info: CaptureInfo?
 
     var count: Int {
-        switch self {
+        switch payload {
         case .raw(let f): return f.count
         case .developed(let i): return i.count
         }

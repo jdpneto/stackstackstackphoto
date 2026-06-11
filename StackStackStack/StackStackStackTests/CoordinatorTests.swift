@@ -262,7 +262,7 @@ final class CoordinatorTests: XCTestCase {
     func testHEICEncodeFailureFallsBackToJPEG() async throws {
         let (coord, store) = makeCoordinator()
         coord.exportFormat = .heic
-        coord.encodeImage = { rgba, w, h, format, quality in
+        coord.encodeImage = { rgba, w, h, format, quality, _ in
             if format == .heic { throw ImageEncoderError.finalizeFailed }   // simulate an encoder hiccup
             return try ImageEncoder.encode(rgba8: rgba, width: w, height: h, format: format, quality: quality)
         }
@@ -279,7 +279,7 @@ final class CoordinatorTests: XCTestCase {
         let (coord, store) = makeCoordinator()
         coord.mode = .smoothMotion                 // a look that stores a reference
         coord.exportFormat = .heic
-        coord.encodeImage = { rgba, w, h, format, quality in
+        coord.encodeImage = { rgba, w, h, format, quality, _ in
             if format == .heic { throw ImageEncoderError.finalizeFailed }
             return try ImageEncoder.encode(rgba8: rgba, width: w, height: h, format: format, quality: quality)
         }
@@ -410,6 +410,23 @@ final class CoordinatorTests: XCTestCase {
         XCTAssertEqual(coord.environmentNote, "Low battery")
     }
 
+    // MARK: - Task 2 (CaptureInfo / CapturedBurst struct) tests
+
+    @MainActor
+    func testCaptureInfoLandsOnRecord() async throws {
+        // A fake that provides CaptureInfo ensures iso/shutterSeconds reach the StackRecord.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = LibraryStore(rootDirectory: dir)
+        let coord = StackCaptureCoordinator(capture: RawFakeWithInfo(width: 16, height: 16), store: store)
+        coord.mode = .noiseReduction
+        await coord.shoot()
+        await coord.awaitProcessing()
+        XCTAssertNil(coord.lastError)
+        let rec = try XCTUnwrap(store.loadAll().first)
+        XCTAssertEqual(rec.iso ?? 0, 640, accuracy: 1e-9)
+        XCTAssertEqual(rec.shutterSeconds ?? 0, 0.01, accuracy: 1e-9)
+    }
+
     // MARK: - Task 2 (CapturedBurst / non-RAW fallback) tests
 
     @MainActor
@@ -458,9 +475,28 @@ private struct DevelopedFake: CaptureService {
             onProgress?(k + 1)
             return img
         }
-        return .developed(imgs)
+        return CapturedBurst(payload: .developed(imgs), info: nil)
     }
     var supportsRAWCapture: Bool { false }
+}
+
+/// RAW-path fake that provides a CaptureInfo so the coordinator test can verify the info
+/// reaches the StackRecord without needing a real camera.
+private struct RawFakeWithInfo: CaptureService {
+    let width: Int, height: Int
+    func startPreview() async -> CALayer? { nil }
+    func captureBurst(recipe: CaptureRecipe, isSteady: @escaping @Sendable () -> Bool,
+                      onProgress: (@Sendable (Int) -> Void)?) async throws -> CapturedBurst {
+        await Task.yield()
+        let n = max(recipe.frameCount, 1)
+        let frames = (0..<n).map { _ in
+            RawSensorFrame(width: width, height: height,
+                           mosaic: [UInt16](repeating: 200, count: width * height),
+                           blackLevel: 64, whiteLevel: 1024, cfa: .rggb,
+                           wbGains: SIMD3<Float>(1, 1, 1))
+        }
+        return CapturedBurst(payload: .raw(frames), info: CaptureInfo(iso: 640, shutterSeconds: 0.01))
+    }
 }
 
 private actor ExportLog {
