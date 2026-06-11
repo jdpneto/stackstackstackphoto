@@ -230,6 +230,8 @@ Stack {
 - **Metadata index**: Core Data (iOS) / Room (Android).
 - **Original full-res RAW frames are NOT retained** by default (see §9.3).
 
+> **Implementation status (2026-06-11).** The §9.1 record is implemented leanly: ISO/shutter from the first frame (locked-exposure bursts), result format, and EXIF/ICC in outputs shipped (see 2026-06-11-capture-metadata-design.md). Per-frame metadata arrays, sensor block, and the proxy field remain unimplemented (proxy superseded — see §9.3 note).
+
 ### 9.3 The proxy-only re-edit tradeoff (explicit)
 Because full-res source frames are discarded after stacking:
 - **Global adjustments** (exposure, contrast, WB, crop/straighten, tone) apply non-destructively to the **full-res result** and re-render on export.
