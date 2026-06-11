@@ -100,7 +100,7 @@ import kotlin.math.max
  * looper — a previous revision posted all timers through the main thread, so a busy main thread
  * silently disarmed every watchdog.
  */
-class Camera2CaptureService(
+open class Camera2CaptureService(
     private val context: Context
 ) : CaptureService {
 
@@ -162,7 +162,17 @@ class Camera2CaptureService(
     private var previewSurface: Surface? = null
     private var rawImageReader: ImageReader? = null
     private var jpegImageReader: ImageReader? = null
-    private var configured = false
+    /** Session fully configured. `protected` only for the test seam (PreviewResumeTest). */
+    protected var configured = false
+    /**
+     * STICKY "the UI wants a live preview" intent (bug 3, round 2). Set by [startPreview], cleared
+     * only by [close]. Sticky so that a preview surface arriving LATER than the UI's one-shot
+     * [startPreview] trigger (the resume race: SurfaceView destroys its surface on hide and
+     * recreates it on show, racing the resumeTick LaunchedEffect) auto-resumes the preview from
+     * [setPreviewSurface] — the service owns the restart; the UI's call order can't matter.
+     * sessionExecutor-confined.
+     */
+    private var previewRequested = false
 
     // -----------------------------------------------------------------------
     // Capabilities (written on sessionExecutor once; read elsewhere after configure)
@@ -274,16 +284,63 @@ class Camera2CaptureService(
      *
      * A DIFFERENT surface arriving while the session is configured means the window's surface
      * was destroyed and recreated (app went to the background and back — bug 3): the session
-     * still targets the dead surface, so tear it down and let the next [startPreview]
-     * reconfigure from scratch. (Previously this was a silent no-op once configured and the
-     * preview stayed black.)
+     * still targets the dead surface, so tear it down — and, when a preview has ever been
+     * requested ([previewRequested]), RECONFIGURE AND RESUME THE PREVIEW RIGHT HERE. The first
+     * round of this fix only invalidated and waited for the UI to call [startPreview] again,
+     * but on the Pixel the resume-keyed startPreview raced this call and ran FIRST, against the
+     * stale surface (framework started then stopped the stream 52 ms later); the invalidate
+     * here then tore that session down with both one-shot UI triggers already consumed — black
+     * preview. Owning the restart at the service altitude makes the ordering irrelevant: the
+     * surface is the last event to land, and it restarts the preview itself.
      */
     fun setPreviewSurface(surface: Surface) {
-        sessionExecutor.execute {
-            if (surface === previewSurface) return@execute   // same surface — nothing to do
-            if (configured) invalidateSessionLocked(null)
-            previewSurface = surface
-        }
+        try {
+            sessionExecutor.execute {
+                if (surface === previewSurface) return@execute   // same surface — nothing to do
+                if (configured) invalidateSessionLocked(null)
+                previewSurface = surface
+                if (previewRequested) {
+                    try {
+                        // Fresh configure includes the new surface and starts the repeating
+                        // preview itself (ensureConfiguredLocked tail). No live burst can be
+                        // stomped here: a genuinely new surface means the old session (and any
+                        // hold request on it) is already dead.
+                        ensureConfiguredLocked()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "preview restart on surface replacement failed", e)
+                    }
+                }
+            }
+        } catch (_: RejectedExecutionException) {}   // closed — surface callbacks may outlive us
+    }
+
+    /**
+     * The preview surface was destroyed (SurfaceView hides → app backgrounded). Invalidate any
+     * session targeting it and FORGET it, so nothing can configure against a dead surface in
+     * the window before the recreated surface arrives. [previewRequested] stays sticky — the
+     * next [setPreviewSurface] auto-resumes the preview with no UI involvement.
+     */
+    fun clearPreviewSurface() {
+        try {
+            sessionExecutor.execute {
+                if (previewSurface == null) return@execute
+                if (configured) invalidateSessionLocked(null)
+                previewSurface = null
+            }
+        } catch (_: RejectedExecutionException) {}   // closed — surface callbacks may outlive us
+    }
+
+    /**
+     * TEST-ONLY barrier: blocks until everything queued on [sessionExecutor] so far has run
+     * (FIFO single thread ⇒ a marker task is a fence). Lets PreviewResumeTest assert "nothing
+     * happened" without sleeping.
+     */
+    internal fun awaitSessionQuiescentForTest(timeoutMs: Long = 5_000) {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        try {
+            sessionExecutor.execute { latch.countDown() }
+        } catch (_: RejectedExecutionException) { return }
+        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
     // -----------------------------------------------------------------------
@@ -291,29 +348,45 @@ class Camera2CaptureService(
     // -----------------------------------------------------------------------
 
     /**
-     * Idempotent (bug 3): when the session is already configured this re-issues the plain
-     * repeating preview request, which is harmless if the preview is already streaming and
-     * restores it if the repeating request was lost — UNLESS a burst is in flight, whose
-     * AE/AWB hold owns the repeating slot. When the camera was lost in the background
+     * Idempotent, no-op-safe retrigger (bug 3): when the session is already configured this
+     * re-issues the plain repeating preview request, which is harmless if the preview is already
+     * streaming and restores it if the repeating request was lost — UNLESS a burst is in flight,
+     * whose AE/AWB hold owns the repeating slot. When the camera was lost in the background
      * ([invalidateSessionLocked] ran), `configured` is false and this reopens from scratch.
+     *
+     * Reads the CURRENT [previewSurface] at execution time on [sessionExecutor] (never a captured
+     * reference — the surface may have been replaced or cleared since the caller suspended).
+     * With NO surface stored (destroyed, or not created yet) this only records the sticky
+     * [previewRequested] intent and returns null: configuring now would open the camera with no
+     * preview output only to tear it straight down when the recreated surface lands in
+     * [setPreviewSurface] — which then owns the actual (re)start.
      */
     override suspend fun startPreview(): Surface? {
         if (!ensurePermission()) return null
         return suspendCancellableCoroutine { cont ->
-            sessionExecutor.execute {
-                try {
-                    val wasConfigured = configured
-                    ensureConfiguredLocked()
-                    // ensureConfiguredLocked starts the repeating preview itself on a fresh
-                    // configure; on the already-configured path restore it here (never mid-burst).
-                    if (wasConfigured && !stateLock.withLock { continuation != null }) {
-                        startPreviewRequestLocked()
+            try {
+                sessionExecutor.execute {
+                    previewRequested = true
+                    if (previewSurface == null) {
+                        cont.resume(null)   // sticky flag set — the next surface auto-resumes
+                        return@execute
                     }
-                    cont.resume(previewSurface)
-                } catch (e: Exception) {
-                    Log.w(TAG, "startPreview configure failed", e)
-                    cont.resume(null)
+                    try {
+                        val wasConfigured = configured
+                        ensureConfiguredLocked()
+                        // ensureConfiguredLocked starts the repeating preview itself on a fresh
+                        // configure; on the already-configured path restore it here (never mid-burst).
+                        if (wasConfigured && !stateLock.withLock { continuation != null }) {
+                            startPreviewRequestLocked()
+                        }
+                        cont.resume(previewSurface)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "startPreview configure failed", e)
+                        cont.resume(null)
+                    }
                 }
+            } catch (e: RejectedExecutionException) {
+                cont.resume(null)   // service closed
             }
         }
     }
@@ -1238,8 +1311,11 @@ class Camera2CaptureService(
      * and probes capabilities. Both async waits are BOUNDED — an unbounded `latch.await()` here
      * used to block the session thread (and with it every queued capture) forever if the HAL
      * never called back.
+     *
+     * `protected open` only as the Robolectric test seam (PreviewResumeTest overrides it to count
+     * configures without a camera HAL); production code must not override.
      */
-    private fun ensureConfiguredLocked() {
+    protected open fun ensureConfiguredLocked() {
         if (configured) return
 
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -1420,7 +1496,9 @@ class Camera2CaptureService(
      * CURRENT device (a stale callback from an already-replaced device, or a failure during open
      * before [cameraDevice] was assigned — those paths are handled by the open latch).
      * [previewSurface] is deliberately KEPT: the window's surface usually survives backgrounding
-     * and the rebuilt session should reuse it; a recreated surface arrives via [setPreviewSurface].
+     * and the rebuilt session should reuse it. A DESTROYED surface is cleared by
+     * [clearPreviewSurface]; a recreated one arrives via [setPreviewSurface], which owns the
+     * preview restart ([previewRequested]).
      *
      * Any in-flight burst is not touched here — its frames simply stop arriving and the
      * per-frame watchdog/drain timeout finish it with the frames gathered so far.
@@ -1444,9 +1522,11 @@ class Camera2CaptureService(
     /**
      * Start (or restore) the plain repeating preview request — no-op without a preview surface.
      * Also serves as the post-burst unlock: replacing the burst's hold request resumes the
-     * AE/AWB auto loop.
+     * AE/AWB auto loop. Reads the CURRENT [previewSurface] field at execution time.
+     *
+     * `protected open` only as the Robolectric test seam (PreviewResumeTest).
      */
-    private fun startPreviewRequestLocked() {
+    protected open fun startPreviewRequestLocked() {
         val session = captureSession ?: return
         val device  = cameraDevice  ?: return
         val surface = previewSurface ?: return
@@ -1489,6 +1569,8 @@ class Camera2CaptureService(
             rawImageReader = null
             jpegImageReader = null
             configured = false
+            previewRequested = false   // a surface arriving after close must NOT reopen
+            previewSurface = null
             imageHandler.post { clearJoinState() }
             scheduler.shutdown()
             conversionExecutor.shutdown()

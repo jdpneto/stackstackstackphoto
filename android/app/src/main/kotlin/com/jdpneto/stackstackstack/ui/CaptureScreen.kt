@@ -151,6 +151,12 @@ fun CaptureScreen(
     // Bumping a counter on every ON_RESUME re-keys CameraPreview's LaunchedEffect so startPreview
     // runs again; the service made that call idempotent (still streaming → harmless repeating-
     // request reissue; camera lost → full reconfigure).
+    //
+    // When the surface DID get destroyed/recreated, this trigger can race surfaceCreated (it did,
+    // on the Pixel) — that's fine now: the service owns the preview restart (sticky
+    // previewRequested in Camera2CaptureService; a startPreview with no surface is a deferred
+    // no-op and the arriving surface resumes itself). resumeTick stays as belt-and-braces for
+    // the surface-survived case; the service is correct without it.
     var resumeTick by remember { mutableStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -403,6 +409,12 @@ private fun CameraPreview(
                     }
                     override fun surfaceChanged(holder: SurfaceHolder, fmt: Int, w: Int, h: Int) {}
                     override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        // Tell the service the surface is DEAD so nothing (e.g. a racing
+                        // resumeTick startPreview) configures against it; the recreated
+                        // surface auto-resumes the preview service-side (sticky
+                        // previewRequested — see Camera2CaptureService.setPreviewSurface).
+                        (coordinator.captureService as? Camera2CaptureService)
+                            ?.clearPreviewSurface()
                         surfaceReady = false
                     }
                 })
