@@ -27,7 +27,15 @@ data class Transform2D(
         }
     }
 
-    /** Map a point: (x, y) → (a·x + b·y + tx, c·x + d·y + ty). Returns a (x, y) pair. */
+    /**
+     * Map a point: (x, y) → (a·x + b·y + tx, c·x + d·y + ty). Returns a (x, y) pair.
+     *
+     * NOT for per-pixel loops: the generic Pair BOXES both Floats — 3 heap allocations per
+     * call under ART, which has no real escape analysis (HotSpot erases them; a Pixel does
+     * not). Hot loops ([AffineAligner.warp] / `ssdWarped`) inline this exact arithmetic with
+     * hoisted a/b/c/d/tx/ty locals instead — keep any new O(pixels) call site allocation-free
+     * the same way.
+     */
     fun apply(x: Float, y: Float): Pair<Float, Float> =
         Pair(a * x + b * y + tx, c * x + d * y + ty)
 
