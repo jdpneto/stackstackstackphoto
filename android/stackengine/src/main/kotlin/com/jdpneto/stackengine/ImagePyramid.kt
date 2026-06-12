@@ -22,24 +22,33 @@ object ImagePyramid {
         val ow = (w + 1) / 2
         val oh = (h + 1) / 2
         val out = PixelImage(ow, oh)
+        // Hot loop (every downscale AND every estimate's pyramid build, 25 taps per output
+        // pixel): read the flat pixel array directly into the 3 scalar accumulators — the old
+        // `img[sx, sy]` allocated a Vec3 PER TAP under ART (no escape analysis on device).
+        // Same float ops in the same order — bit-identical (identity test).
+        val src = img.pixels
+        val dst = out.pixels
         for (oy in 0 until oh) {
             for (ox in 0 until ow) {
                 var ax = 0f; var ay = 0f; var az = 0f; var wsum = 0f
                 for (dy in 0 until 5) {
                     val sy = 2 * oy + dy - 2
                     if (sy < 0 || sy >= h) continue
+                    val ky = kernel[dy]
+                    val rowBase = sy * w
                     for (dx in 0 until 5) {
                         val sx = 2 * ox + dx - 2
                         if (sx < 0 || sx >= w) continue
-                        val wgt = kernel[dx] * kernel[dy]
-                        val p = img[sx, sy]
-                        ax += p.x * wgt; ay += p.y * wgt; az += p.z * wgt
+                        val wgt = kernel[dx] * ky
+                        val base = (rowBase + sx) * 3
+                        ax += src[base] * wgt; ay += src[base + 1] * wgt; az += src[base + 2] * wgt
                         wsum += wgt
                     }
                 }
                 // renormalize at borders
                 if (wsum > 0f) {
-                    out[ox, oy] = Vec3(ax / wsum, ay / wsum, az / wsum)
+                    val obase = (oy * ow + ox) * 3
+                    dst[obase] = ax / wsum; dst[obase + 1] = ay / wsum; dst[obase + 2] = az / wsum
                 }
                 // else leaves zero (wsum==0 can't happen for non-empty images, guard is defensive)
             }
@@ -58,6 +67,10 @@ object ImagePyramid {
         val w = img.width
         val h = img.height
         val out = PixelImage(toWidth, toHeight)
+        // Same flat-array treatment as [reduce]: scalar accumulators, no Vec3 per tap
+        // (expand runs per pixel in every Laplacian build/collapse of the DoF blend).
+        val src = img.pixels
+        val dst = out.pixels
         for (ty in 0 until toHeight) {
             for (tx in 0 until toWidth) {
                 var ax = 0f; var ay = 0f; var az = 0f; var wsum = 0f
@@ -66,19 +79,22 @@ object ImagePyramid {
                     if (syNum % 2 != 0) continue
                     val sy = syNum / 2
                     if (sy < 0 || sy >= h) continue
+                    val ky = kernel[dy]
+                    val rowBase = sy * w
                     for (dx in 0 until 5) {
                         val sxNum = tx + dx - 2
                         if (sxNum % 2 != 0) continue
                         val sx = sxNum / 2
                         if (sx < 0 || sx >= w) continue
-                        val wgt = kernel[dx] * kernel[dy]
-                        val p = img[sx, sy]
-                        ax += p.x * wgt; ay += p.y * wgt; az += p.z * wgt
+                        val wgt = kernel[dx] * ky
+                        val base = (rowBase + sx) * 3
+                        ax += src[base] * wgt; ay += src[base + 1] * wgt; az += src[base + 2] * wgt
                         wsum += wgt
                     }
                 }
                 if (wsum > 0f) {
-                    out[tx, ty] = Vec3(ax / wsum, ay / wsum, az / wsum)
+                    val obase = (ty * toWidth + tx) * 3
+                    dst[obase] = ax / wsum; dst[obase + 1] = ay / wsum; dst[obase + 2] = az / wsum
                 }
             }
         }
