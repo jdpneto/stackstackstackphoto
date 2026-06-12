@@ -14,6 +14,14 @@ import kotlin.math.sqrt
 object AffineAligner {
 
     /**
+     * Min dimension of the COARSEST pyramid level [estimate] optimizes at. Shared with
+     * `Pipeline.estimateWholeFrameAlignment`'s robust translation pre-pass: a hint measured at a
+     * level built with the same reduce sequence divides back down (`1 shl (levels−1)`) onto the
+     * coarsest optimizer level exactly, so the pre-pass and the optimizer agree on the basin.
+     */
+    internal const val estimatePyramidMinSize = 24
+
+    /**
      * Warp [img] by [t] about the image centre, bilinear + edge-clamped:
      * out[x,y] samples img at t.apply(x − cx, y − cy) + (cx, cy).
      */
@@ -22,10 +30,44 @@ object AffineAligner {
         val cx = (w - 1).toFloat() / 2f
         val cy = (h - 1).toFloat() / 2f
         val out = PixelImage(w, h)
+        // Hot loop (full working resolution × every frame): inline the affine map and the
+        // bilinear sample over the flat pixel array — no Pair/Vec3 temporaries ART would have
+        // to scalar-replace (it can't; each would be a real allocation per pixel on device).
+        // Same float ops in the same order as Transform2D.apply + the old Vec3 sampleRGB,
+        // so the result is bit-identical (proven by the identity test).
+        val a = by.a; val b = by.b; val c = by.c; val d = by.d
+        val ttx = by.tx; val tty = by.ty
+        val src = img.pixels
+        val dst = out.pixels
+        val wf = w.toFloat(); val hf = h.toFloat()
+        var di = 0
         for (y in 0 until h) {
+            val yr = y.toFloat() - cy
             for (x in 0 until w) {
-                val (px, py) = by.apply(x.toFloat() - cx, y.toFloat() - cy)
-                out[x, y] = sampleRGB(img, px + cx, py + cy)
+                val xr = x.toFloat() - cx
+                // Transform2D.apply inlined: (a·x + b·y + tx, c·x + d·y + ty), then +centre.
+                val fxIn = a * xr + b * yr + ttx + cx
+                val fyIn = c * xr + d * yr + tty + cy
+                // Bilinear, edge-clamped (same clamp + lerp order as the old sampleRGB).
+                val fx = (if (fxIn.isFinite()) fxIn else 0f).coerceIn(-1f, wf)
+                val fy = (if (fyIn.isFinite()) fyIn else 0f).coerceIn(-1f, hf)
+                val x0 = floor(fx).toInt(); val y0 = floor(fy).toInt()
+                val tx = fx - x0.toFloat(); val ty = fy - y0.toFloat()
+                val x0c = x0.coerceIn(0, w - 1); val x1c = (x0 + 1).coerceIn(0, w - 1)
+                val y0c = y0.coerceIn(0, h - 1); val y1c = (y0 + 1).coerceIn(0, h - 1)
+                val i00 = (y0c * w + x0c) * 3; val i10 = (y0c * w + x1c) * 3
+                val i01 = (y1c * w + x0c) * 3; val i11 = (y1c * w + x1c) * 3
+                // top = p00 + (p10 − p00)·tx; bot = p01 + (p11 − p01)·tx; out = top + (bot − top)·ty
+                val topR = src[i00]     + (src[i10]     - src[i00])     * tx
+                val topG = src[i00 + 1] + (src[i10 + 1] - src[i00 + 1]) * tx
+                val topB = src[i00 + 2] + (src[i10 + 2] - src[i00 + 2]) * tx
+                val botR = src[i01]     + (src[i11]     - src[i01])     * tx
+                val botG = src[i01 + 1] + (src[i11 + 1] - src[i01 + 1]) * tx
+                val botB = src[i01 + 2] + (src[i11 + 2] - src[i01 + 2]) * tx
+                dst[di]     = topR + (botR - topR) * ty
+                dst[di + 1] = topG + (botG - topG) * ty
+                dst[di + 2] = topB + (botB - topB) * ty
+                di += 3
             }
         }
         return out
@@ -49,8 +91,8 @@ object AffineAligner {
         translationHint: Pair<Float, Float>? = null
     ): Transform2D {
         require(reference.width == moving.width && reference.height == moving.height)
-        val refPyr = ImagePyramid.gaussian(reference, minSize = 24)
-        val movPyr = ImagePyramid.gaussian(moving, minSize = 24)
+        val refPyr = ImagePyramid.gaussian(reference, minSize = estimatePyramidMinSize)
+        val movPyr = ImagePyramid.gaussian(moving, minSize = estimatePyramidMinSize)
         val levels = refPyr.size
         var s = 1f; var r = 0f
         var tx = (translationHint?.first ?: 0f) / (1 shl (levels - 1)).toFloat()
@@ -117,20 +159,33 @@ object AffineAligner {
 
     /**
      * Mean SSD between [reference] luma and [moving] luma warped by [t] (centred, bilinear).
+     *
+     * THE hottest function in a burst (~57% of estimate, hundreds of millions of pixel visits
+     * across the Hooke–Jeeves trials): the affine map is inlined with hoisted a/b/c/d/tx/ty
+     * locals instead of `t.apply` — the generic Pair return boxes both Floats, which ART
+     * (no real escape analysis) turns into 3 heap allocations per pixel. Same float ops in
+     * the same order — bit-identical (identity test). `internal` for that test AND for
+     * `Pipeline.estimateWholeFrameAlignment`'s rescue path, which uses it to compare candidate
+     * registrations by the exact cost the optimizer minimizes.
      */
-    private fun ssdWarped(
+    internal fun ssdWarped(
         movL: FloatArray, refL: FloatArray, w: Int, h: Int,
         t: Transform2D, robustClip: Float?
     ): Float {
         val cx = (w - 1).toFloat() / 2f
         val cy = (h - 1).toFloat() / 2f
+        val a = t.a; val b = t.b; val c = t.c; val d = t.d
+        val ttx = t.tx; val tty = t.ty
         var sum = 0f
         for (y in 0 until h) {
+            val yr = y.toFloat() - cy
+            val rowBase = y * w
             for (x in 0 until w) {
-                val (px, py) = t.apply(x.toFloat() - cx, y.toFloat() - cy)
-                val m = sampleLuma(movL, w, h, px + cx, py + cy)
-                val d = m - refL[y * w + x]
-                val d2 = d * d
+                val xr = x.toFloat() - cx
+                // Transform2D.apply inlined: (a·x + b·y + tx, c·x + d·y + ty), then +centre.
+                val m = sampleLuma(movL, w, h, a * xr + b * yr + ttx + cx, c * xr + d * yr + tty + cy)
+                val diff = m - refL[rowBase + x]
+                val d2 = diff * diff
                 sum += if (robustClip != null) minOf(d2, robustClip) else d2  // cap outliers (moving regions)
             }
         }
@@ -244,19 +299,8 @@ object AffineAligner {
     }
 
     // MARK: - Private samplers (bilinear, edge-clamped)
-
-    private fun sampleRGB(img: PixelImage, fxIn: Float, fyIn: Float): Vec3 {
-        val w = img.width; val h = img.height
-        // Clamp to a finite, near-bounds range so floor() doesn't overflow on runaway coords.
-        val fx = (if (fxIn.isFinite()) fxIn else 0f).coerceIn(-1f, w.toFloat())
-        val fy = (if (fyIn.isFinite()) fyIn else 0f).coerceIn(-1f, h.toFloat())
-        val x0 = floor(fx).toInt(); val y0 = floor(fy).toInt()
-        val tx = fx - x0.toFloat(); val ty = fy - y0.toFloat()
-        fun at(x: Int, y: Int): Vec3 = img[x.coerceIn(0, w - 1), y.coerceIn(0, h - 1)]
-        val top = at(x0, y0) + (at(x0 + 1, y0) - at(x0, y0)) * tx
-        val bot = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * tx
-        return top + (bot - top) * ty
-    }
+    // The RGB sampler lives INLINED in [warp] (flat-array, scalar channels) — a separate
+    // Vec3-returning helper would put ~12 Vec3 temporaries per pixel back on the ART heap.
 
     private fun sampleLuma(l: FloatArray, w: Int, h: Int, fxIn: Float, fyIn: Float): Float {
         val fx = (if (fxIn.isFinite()) fxIn else 0f).coerceIn(-1f, w.toFloat())
@@ -292,8 +336,11 @@ data class ChainBounds(
      * Per-pixel squared-residual cap passed to [AffineAligner.estimate] and the robust
      * translation pre-pass, so focus-blur mismatches between adjacent brackets cannot pull the
      * optimizer off the common background signal.
-     * Default (0.0001) tuned on the synthetic bracket fixture (band amplitude diff ≈ 0.20);
-     * the proven handheld clip for whole-frame alignment is Pipeline.alignmentRobustClip = 0.02.
+     * Default (0.0001) tuned on the synthetic bracket fixture (band amplitude diff ≈ 0.20) and
+     * field-proven on real device brackets (DepthBracketRegressionTests, 2026-06-10). The
+     * whole-frame burst paths use a SCENE-ADAPTIVE clip bounded by the same value
+     * (`Pipeline.adaptiveAlignmentClip`, dim-scene investigation 2026-06-12) — kept as SEPARATE
+     * constants on purpose so retuning one path can never silently change the other.
      * Validate on-device (Task 12); if high-ISO links mis-seed, relax toward 0.001.
      * null = plain SSD (no clipping).
      */

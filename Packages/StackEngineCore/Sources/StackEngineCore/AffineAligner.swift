@@ -4,6 +4,12 @@ import simd
 /// `Transform2D` about its centre, and estimate the transform that aligns a moving frame to a
 /// reference by a deterministic intensity pattern search on the luma proxy (spec §3.2).
 public enum AffineAligner {
+    /// Min dimension of the COARSEST pyramid level `estimate` optimizes at. Shared with
+    /// `Pipeline.estimateWholeFrameAlignment`'s robust translation pre-pass: a hint measured at a
+    /// level built with the same reduce sequence divides back down (`1 << (levels−1)`) onto the
+    /// coarsest optimizer level exactly, so the pre-pass and the optimizer agree on the basin.
+    static let estimatePyramidMinSize = 24
+
     /// Warp `img` by `t` about the image centre, bilinear + edge-clamped:
     /// out[x,y] samples img at t.apply(x − cx, y − cy) + (cx, cy).
     public static func warp(_ img: PixelImage, by t: Transform2D) -> PixelImage {
@@ -33,8 +39,8 @@ public enum AffineAligner {
                                 translationSearch: Int = 8, robustClip: Float? = nil,
                                 translationHint: SIMD2<Float>? = nil) -> Transform2D {
         precondition(ref.width == mov.width && ref.height == mov.height)
-        let refPyr = ImagePyramid.gaussian(ref, minSize: 24)
-        let movPyr = ImagePyramid.gaussian(mov, minSize: 24)
+        let refPyr = ImagePyramid.gaussian(ref, minSize: estimatePyramidMinSize)
+        let movPyr = ImagePyramid.gaussian(mov, minSize: estimatePyramidMinSize)
         let levels = refPyr.count
         var s: Float = 1, r: Float = 0
         var tx: Float = (translationHint?.x ?? 0) / Float(1 << (levels - 1))
@@ -98,8 +104,10 @@ public enum AffineAligner {
     }
 
     /// Mean SSD between `reference` luma and `moving` luma warped by `t` (centred, bilinear).
-    private static func ssdWarped(_ movL: [Float], _ refL: [Float], width w: Int, height h: Int,
-                                  by t: Transform2D, robustClip: Float?) -> Float {
+    /// Internal (not private): `Pipeline.estimateWholeFrameAlignment`'s rescue path uses it to
+    /// compare candidate registrations by the exact cost the optimizer minimizes.
+    static func ssdWarped(_ movL: [Float], _ refL: [Float], width w: Int, height h: Int,
+                          by t: Transform2D, robustClip: Float?) -> Float {
         let cx = Float(w - 1) / 2, cy = Float(h - 1) / 2
         var sum: Float = 0
         for y in 0..<h {
@@ -249,8 +257,11 @@ public struct ChainBounds: Sendable, Equatable {
     /// Per-pixel squared-residual cap passed to `AffineAligner.estimate` and the robust
     /// translation pre-pass, so focus-blur mismatches between adjacent brackets cannot pull the
     /// optimizer off the common background signal.
-    /// Default (0.0001) tuned on the synthetic bracket fixture (band amplitude diff ≈ 0.20);
-    /// the proven handheld clip for whole-frame alignment is Pipeline.alignmentRobustClip = 0.02.
+    /// Default (0.0001) tuned on the synthetic bracket fixture (band amplitude diff ≈ 0.20) and
+    /// field-proven on real device brackets (DepthBracketRegressionTests, 2026-06-10). The
+    /// whole-frame burst paths use a SCENE-ADAPTIVE clip bounded by the same value
+    /// (`Pipeline.adaptiveAlignmentClip`, dim-scene investigation 2026-06-12) — kept as SEPARATE
+    /// constants on purpose so retuning one path can never silently change the other.
     /// Validate on-device (Task 12); if high-ISO links mis-seed, relax toward 0.001.
     /// nil = plain SSD (no clipping).
     public var robustClip: Float?

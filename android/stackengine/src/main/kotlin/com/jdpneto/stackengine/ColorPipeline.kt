@@ -154,19 +154,6 @@ internal fun fusedBinDemosaic(f: RawSensorFrame): PixelImage {
     return out
 }
 
-/** Multiply a column-major 3×3 matrix (9 floats) by a Vec3. */
-private fun mat3MulVec3(m: FloatArray, v: Vec3): Vec3 {
-    // m is column-major: [c0x,c0y,c0z, c1x,c1y,c1z, c2x,c2y,c2z]
-    // out.x = col0.x*v.x + col1.x*v.y + col2.x*v.z  = m[0]*v.x + m[3]*v.y + m[6]*v.z
-    // out.y = col0.y*v.x + col1.y*v.y + col2.y*v.z  = m[1]*v.x + m[4]*v.y + m[7]*v.z
-    // out.z = col0.z*v.x + col1.z*v.y + col2.z*v.z  = m[2]*v.x + m[5]*v.y + m[8]*v.z
-    return Vec3(
-        m[0] * v.x + m[3] * v.y + m[6] * v.z,
-        m[1] * v.x + m[4] * v.y + m[7] * v.z,
-        m[2] * v.x + m[5] * v.y + m[8] * v.z
-    )
-}
-
 /** Color pipeline: linearize → white-balance → demosaic → color-matrix. */
 object ColorPipeline {
 
@@ -193,13 +180,21 @@ object ColorPipeline {
         val out = demosaiced
         val m = frame.colorMatrix
         val n = out.pixelCount
+        // Hot loop (every pixel of every developed frame): scalar 3×3 multiply straight on the
+        // flat array — the old per-pixel Vec3-in/Vec3-out pair is 2 real heap allocations per
+        // pixel under ART. m is column-major: [c0x,c0y,c0z, c1x,c1y,c1z, c2x,c2y,c2z], so
+        //   out.r = m[0]·r + m[3]·g + m[6]·b   (and likewise rows 1/2)
+        // — the exact ops/order of the old mat3MulVec3 (bit-identical, identity-tested).
+        val m0 = m[0]; val m1 = m[1]; val m2 = m[2]
+        val m3 = m[3]; val m4 = m[4]; val m5 = m[5]
+        val m6 = m[6]; val m7 = m[7]; val m8 = m[8]
+        val p = out.pixels
         for (i in 0 until n) {
             val base = i * 3
-            val v = Vec3(out.pixels[base], out.pixels[base + 1], out.pixels[base + 2])
-            val mv = mat3MulVec3(m, v)
-            out.pixels[base]     = mv.x
-            out.pixels[base + 1] = mv.y
-            out.pixels[base + 2] = mv.z
+            val r = p[base]; val g = p[base + 1]; val b = p[base + 2]
+            p[base]     = m0 * r + m3 * g + m6 * b
+            p[base + 1] = m1 * r + m4 * g + m7 * b
+            p[base + 2] = m2 * r + m5 * g + m8 * b
         }
         return out
     }
