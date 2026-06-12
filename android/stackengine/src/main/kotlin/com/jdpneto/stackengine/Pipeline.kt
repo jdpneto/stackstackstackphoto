@@ -1,7 +1,10 @@
 package com.jdpneto.stackengine
 
+import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
  * A dedicated cancellation exception that is NOT a subtype of [kotlinx.coroutines.CancellationException],
@@ -37,11 +40,10 @@ object Pipeline {
         val aligned = parallelMap(imgs.indices.toList()) { i ->
             if (i == refIdx) return@parallelMap imgs[i]
             val movSmall = downscaleOne(imgs[i], alignmentEstimateEdge)
-            val ts = AffineAligner.estimate(
-                reference = refSmall, moving = movSmall,
-                translationSearch = searchRange, robustClip = alignmentRobustClip
+            val t = estimateWholeFrameAlignment(
+                referenceSmall = refSmall, movingSmall = movSmall,
+                factor = factor, searchRange = searchRange
             )
-            val t = Transform2D(a = ts.a, b = ts.b, c = ts.c, d = ts.d, tx = ts.tx * factor, ty = ts.ty * factor)
             AffineAligner.warp(imgs[i], by = t)
         }
         return Pair(aligned, refIdx)
@@ -62,10 +64,207 @@ object Pipeline {
     internal const val alignmentEstimateEdge = 720
 
     /**
-     * Caps each pixel's squared luma residual during estimation (luma ∈ [0,1]); |Δluma| ≳ 0.14 is
-     * treated as "moves differently from the global motion" and down-weighted.
+     * Bounds for the ADAPTIVE per-pair robust clip used during WHOLE-FRAME registration. The clip
+     * caps each pixel's squared luma residual (luma ∈ [0,1]): residuals above it are treated as
+     * "moves differently from the global motion" and contribute a fixed (saturated) cost.
+     *
+     * WHY ADAPTIVE (investigation 2026-06-12, dim-room-with-TV ghosting on device): the clip is
+     * an ABSOLUTE cap, and no fixed value fits every scene.
+     *  • Too LOOSE in a dim scene: with the old fixed 0.02 (≈ |Δluma| 0.14, calibrated bright),
+     *    a dim static background (luma 0.01–0.1) produces residuals far below the cap — almost
+     *    no cost — while a bright mover (a TV at luma 0.2–0.97) dominates: its scene cuts
+     *    saturate at the cap (still 20–200× the background signal) and its smooth pans stay
+     *    UNDER the cap and are fully trusted, so the optimizer fits the TV's content motion as
+     *    camera motion (43 px misregistration at 1.5 px true drift on device; clip sweep on the
+     *    synthetic repro: 0.02 → 184 px mean error, 1e-4 → 1.2 px).
+     *  • Too TIGHT in a bright scene: a fixed 1e-4 (≈ |Δluma| 0.01) sits BELOW the residual
+     *    floor of bright noisy frames (sensor noise alone exceeds it) and below the sub-pixel
+     *    interpolation residual of any high-contrast texture — every pixel saturates, the cost
+     *    surface goes flat, and both the integer pre-pass and the similarity refinement lose
+     *    their signal (measured 2026-06-12: HandheldAlignmentTests' ±1° shake stopped being
+     *    corrected and PipelineTests' noisy stack stopped converging at a fixed 1e-4).
+     * So the clip is derived per frame pair from the data in TWO stages (see
+     * [estimateWholeFrameAlignment]): a loose clip from the UNALIGNED coarse residual seeds the
+     * robust integer pre-pass, then the clip is re-measured AT the pre-pass shift — the aligned
+     * residual floor — for the similarity refinement. The second stage matters: measuring at
+     * zero shift inflates the median by the burst's own integer drift (texture decorrelation),
+     * which is exactly the signal being estimated, and the resulting over-loose clip let
+     * edge-clamp outlier pixels keep full quadratic influence and drag the optimizer into
+     * micro-rotations (measured 2026-06-12 on PipelineTests' noisy stack: r ≈ 0.003–0.006 rad
+     * spurious vs ≤ 0.001 with the floor measured at the aligned shift).
+     * Only a FLOOR of 1e-4 (the dim-scene-validated value) is applied — deliberately NO ceiling:
+     * capping the clip below the scene's own residual floor recreates the flat-cost failure
+     * (verified 2026-06-12 — a 0.02 ceiling re-broke the ±1° shake test by saturating the
+     * blurred coarse checkerboard's sub-pixel residuals).
+     *
+     * NOTE: the depth-of-field chain deliberately has its OWN fixed clip ([ChainBounds.robustClip]
+     * = 1e-4, field-proven with `ChainBounds.default` on real brackets) — kept separate so
+     * retuning one path can never silently change the other.
      */
-    internal const val alignmentRobustClip: Float = 0.02f
+    internal const val alignmentRobustClipFloor: Float = 1e-4f
+
+    /**
+     * The clip saturates residuals beyond [alignmentClipSigma] robust standard deviations of the
+     * measured coarse residual floor: inliers (noise + sub-pixel interpolation error) stay
+     * un-saturated and keep the cost surface informative, while genuinely-different content
+     * (a bright mover, a scene cut) saturates. 3σ ⇒ ~0.3% false saturation if residuals were
+     * Gaussian — i.e. essentially only true outliers are capped.
+     */
+    internal const val alignmentClipSigma: Float = 3f
+
+    /**
+     * Plausibility bounds for the whole-frame similarity estimate (ChainBounds-style, but sized
+     * for a WHOLE BURST relative to its anchor rather than one focus step). Handheld burst motion
+     * is bounded by the steadiness gate (pitch/roll ≲ 2.9°) and the ~2 s burst duration (yaw
+     * drift ≈ 6% of the long edge at working resolution, investigation 2026-06-12); a similarity
+     * fit outside these bounds is the optimizer explaining scene content motion (the bright-TV
+     * failure) as camera motion, and must not be trusted with scale/rotation.
+     */
+    internal const val alignmentMaxScaleDelta: Float = 0.05f
+    internal const val alignmentMaxRotationRadians: Float = 0.08f        // ~4.6°
+    internal const val alignmentMaxTranslationFraction: Float = 0.25f    // of the estimate-image long edge
+
+    /**
+     * Whole-frame anchor registration shared by [alignedStackWithRefIdx] (batch) and both
+     * streaming paths. [referenceSmall]/[movingSmall] are the estimate-resolution copies (long
+     * edge ≤ [alignmentEstimateEdge]); [factor] scales estimate-space translation back to
+     * working-resolution pixels.
+     *
+     * Recipe (investigation 2026-06-12 — dim-scene/bright-mover ghosting; mirrors the depth
+     * chain's field-proven `boundedLink`):
+     *  0. ADAPTIVE robust clip in two stages (see [alignmentRobustClipFloor]): loose from the
+     *     unaligned coarse residual, then re-measured at the pre-pass shift (the aligned floor).
+     *  1. ROBUST translation pre-pass at the coarsest pyramid level — the plain-SSD integer seed
+     *     is what let a bright mover place the optimizer in the wrong basin in a dim scene.
+     *  2. Similarity refinement with the aligned-floor clip, seeded by the hint (the hint path
+     *     skips the unclipped integer seed inside [AffineAligner.estimate]).
+     *  3. Plausibility check. An implausible fit means the hinted basin was wrong (e.g. the
+     *     coarse search latched onto an accidental texture match); rescue by re-fitting from an
+     *     IDENTITY seed and keeping whichever of {identity-seeded similarity (if plausible),
+     *     robust translation-only} has the lower robust cost — a translation can't smear static
+     *     detail the way a spurious rotation/scale does, and the identity fit wins only when it
+     *     genuinely registers more of the frame.
+     */
+    internal fun estimateWholeFrameAlignment(
+        referenceSmall: PixelImage, movingSmall: PixelImage,
+        factor: Float, searchRange: Int
+    ): Transform2D {
+        // (1) Robust integer pre-pass at the SAME coarsest level `estimate` optimizes at, so the
+        // hint (scaled by 2^(levels−1)) divides back exactly onto that level's pixel grid.
+        var refCoarse = referenceSmall
+        var movCoarse = movingSmall
+        var coarseFactor = 1f
+        while (minOf(refCoarse.width, refCoarse.height) > AffineAligner.estimatePyramidMinSize) {
+            refCoarse = ImagePyramid.reduce(refCoarse)
+            movCoarse = ImagePyramid.reduce(movCoarse)
+            coarseFactor *= 2f
+        }
+        val cw = refCoarse.width; val ch = refCoarse.height
+        val refCoarseLuma = Luma.luminance(refCoarse)
+        val movCoarseLuma = Luma.luminance(movCoarse)
+
+        // (0a) Loose clip from the unaligned residual — it still contains the burst drift, so it
+        // only serves to keep true outliers (a bright mover) from steering the integer search.
+        val preClip = adaptiveAlignmentClip(refCoarseLuma, movCoarseLuma,
+            width = cw, height = ch, dx = 0, dy = 0)
+        val shift = Alignment.estimateTranslation(
+            referenceLuma = refCoarseLuma, movingLuma = movCoarseLuma,
+            width = cw, height = ch,
+            searchRange = searchRange, robustClip = preClip
+        )
+        // (0b) The refinement clip: the residual floor AT the aligned shift (noise + sub-pixel
+        // interpolation error only — the drift component is gone).
+        val clip = adaptiveAlignmentClip(refCoarseLuma, movCoarseLuma,
+            width = cw, height = ch, dx = shift.dx, dy = shift.dy)
+        val hint = Pair(shift.dx.toFloat() * coarseFactor, shift.dy.toFloat() * coarseFactor)
+
+        // (2) Robust similarity refinement from the hint's basin.
+        val tHint = AffineAligner.estimate(
+            reference = referenceSmall, moving = movingSmall,
+            robustClip = clip, translationHint = hint
+        )
+
+        // (3) Whole-burst plausibility: trust the similarity only inside the handheld envelope.
+        val longEdge = maxOf(referenceSmall.width, referenceSmall.height).toFloat()
+        if (isPlausibleWholeFrameFit(tHint, longEdge)) {
+            return Transform2D(a = tHint.a, b = tHint.b, c = tHint.c, d = tHint.d,
+                tx = tHint.tx * factor, ty = tHint.ty * factor)
+        }
+
+        // Rescue: the hinted basin was wrong. Candidate A — similarity re-fit from identity
+        // (hint (0,0) skips the integer seed, keeping the optimizer in the identity basin).
+        // Candidate B — robust translation-only (cannot smear). Keep the lower robust cost.
+        val fallback = Transform2D.similarity(scale = 1f, rotation = 0f, tx = hint.first, ty = hint.second)
+        var best = fallback
+        val tZero = AffineAligner.estimate(
+            reference = referenceSmall, moving = movingSmall,
+            robustClip = clip, translationHint = Pair(0f, 0f)
+        )
+        if (isPlausibleWholeFrameFit(tZero, longEdge)) {
+            val refLuma = Luma.luminance(referenceSmall)
+            val movLuma = Luma.luminance(movingSmall)
+            val cZero = AffineAligner.ssdWarped(movLuma, refLuma,
+                referenceSmall.width, referenceSmall.height, tZero, clip)
+            val cFallback = AffineAligner.ssdWarped(movLuma, refLuma,
+                referenceSmall.width, referenceSmall.height, fallback, clip)
+            if (cZero < cFallback) best = tZero
+        }
+        return Transform2D(a = best.a, b = best.b, c = best.c, d = best.d,
+            tx = best.tx * factor, ty = best.ty * factor)
+    }
+
+    /**
+     * True when a similarity fit is inside the handheld whole-burst envelope
+     * ([alignmentMaxScaleDelta] / [alignmentMaxRotationRadians] / [alignmentMaxTranslationFraction]).
+     */
+    internal fun isPlausibleWholeFrameFit(t: Transform2D, longEdge: Float): Boolean {
+        val scale = sqrt(t.a * t.a + t.c * t.c)
+        val rotation = atan2(t.c, t.a)
+        val translation = sqrt(t.tx * t.tx + t.ty * t.ty)
+        return abs(scale - 1f) <= alignmentMaxScaleDelta &&
+            abs(rotation) <= alignmentMaxRotationRadians &&
+            translation <= alignmentMaxTranslationFraction * longEdge
+    }
+
+    /**
+     * Scene-adaptive robust clip for whole-frame registration (see [alignmentRobustClipFloor]
+     * for the full rationale). Measures the residual floor of THIS frame pair — the median
+     * absolute luma residual at integer offset (dx, dy), over the overlap region — scaled to a
+     * Gaussian-consistent sigma (MAD × 1.4826), and saturates residuals beyond
+     * [alignmentClipSigma] sigmas of it:
+     *   clip = max((alignmentClipSigma · 1.4826 · median|Δluma|)², floor)
+     * The median is robust to up to half the frame being covered by a bright mover.
+     * Deterministic (exact median via sort). Offset convention matches
+     * [Alignment.estimateTranslation]: ref[x, y] is compared with mov[x + dx, y + dy].
+     *
+     * Runs once per frame pair on the COARSE level only (not per-pixel-per-trial), so the one
+     * flat scratch buffer + sort below is cheap; the fill is index-addressed FloatArray writes
+     * (no per-element boxing for ART to chew on).
+     */
+    internal fun adaptiveAlignmentClip(
+        refLuma: FloatArray, movLuma: FloatArray,
+        width: Int, height: Int, dx: Int, dy: Int
+    ): Float {
+        val w = width; val h = height
+        val yStart = max(0, -dy); val yEnd = min(h, h - dy)
+        val xStart = max(0, -dx); val xEnd = min(w, w - dx)
+        require(refLuma.size == w * h && movLuma.size == w * h) { "luma buffer size mismatch" }
+        require(yStart < yEnd && xStart < xEnd) { "offset leaves no overlap" }
+        val absDiff = FloatArray((yEnd - yStart) * (xEnd - xStart))
+        var i = 0
+        for (y in yStart until yEnd) {
+            val refRow = y * w
+            val movRow = (y + dy) * w + dx
+            for (x in xStart until xEnd) {
+                absDiff[i++] = abs(refLuma[refRow + x] - movLuma[movRow + x])
+            }
+        }
+        absDiff.sort()
+        val median = absDiff[absDiff.size / 2]
+        val sigma = 1.4826f * median                      // MAD → Gaussian-consistent sigma
+        val cap = alignmentClipSigma * sigma
+        return max(cap * cap, alignmentRobustClipFloor)
+    }
 
     /**
      * Align then apply the look's reducer, ALSO returning the aligned reference (sharpest) frame —
@@ -221,11 +420,10 @@ object Pipeline {
         val result = streamingReduce(count = imgs.size, mode = mode, shouldCancel = shouldCancel) { i ->
             if (i == 0) return@streamingReduce reference
             val movSmall = downscaleOne(imgs[i], alignmentEstimateEdge)
-            val ts = AffineAligner.estimate(
-                reference = refSmall, moving = movSmall,
-                translationSearch = searchRange, robustClip = alignmentRobustClip
+            val t = estimateWholeFrameAlignment(
+                referenceSmall = refSmall, movingSmall = movSmall,
+                factor = factor, searchRange = searchRange
             )
-            val t = Transform2D(a = ts.a, b = ts.b, c = ts.c, d = ts.d, tx = ts.tx * factor, ty = ts.ty * factor)
             AffineAligner.warp(imgs[i], by = t)
         }
         return Pair(result, reference)
@@ -258,11 +456,10 @@ object Pipeline {
             if (i == 0) return@streamingReduce anchor
             val moving = develop(i)
             val movSmall = downscaleOne(moving, alignmentEstimateEdge)
-            val ts = AffineAligner.estimate(
-                reference = refSmall, moving = movSmall,
-                translationSearch = searchRange, robustClip = alignmentRobustClip
+            val t = estimateWholeFrameAlignment(
+                referenceSmall = refSmall, movingSmall = movSmall,
+                factor = factor, searchRange = searchRange
             )
-            val t = Transform2D(a = ts.a, b = ts.b, c = ts.c, d = ts.d, tx = ts.tx * factor, ty = ts.ty * factor)
             AffineAligner.warp(moving, by = t)
         }
         return Pair(result, anchor)

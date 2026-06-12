@@ -14,6 +14,14 @@ import kotlin.math.sqrt
 object AffineAligner {
 
     /**
+     * Min dimension of the COARSEST pyramid level [estimate] optimizes at. Shared with
+     * `Pipeline.estimateWholeFrameAlignment`'s robust translation pre-pass: a hint measured at a
+     * level built with the same reduce sequence divides back down (`1 shl (levels−1)`) onto the
+     * coarsest optimizer level exactly, so the pre-pass and the optimizer agree on the basin.
+     */
+    internal const val estimatePyramidMinSize = 24
+
+    /**
      * Warp [img] by [t] about the image centre, bilinear + edge-clamped:
      * out[x,y] samples img at t.apply(x − cx, y − cy) + (cx, cy).
      */
@@ -83,8 +91,8 @@ object AffineAligner {
         translationHint: Pair<Float, Float>? = null
     ): Transform2D {
         require(reference.width == moving.width && reference.height == moving.height)
-        val refPyr = ImagePyramid.gaussian(reference, minSize = 24)
-        val movPyr = ImagePyramid.gaussian(moving, minSize = 24)
+        val refPyr = ImagePyramid.gaussian(reference, minSize = estimatePyramidMinSize)
+        val movPyr = ImagePyramid.gaussian(moving, minSize = estimatePyramidMinSize)
         val levels = refPyr.size
         var s = 1f; var r = 0f
         var tx = (translationHint?.first ?: 0f) / (1 shl (levels - 1)).toFloat()
@@ -156,7 +164,9 @@ object AffineAligner {
      * across the Hooke–Jeeves trials): the affine map is inlined with hoisted a/b/c/d/tx/ty
      * locals instead of `t.apply` — the generic Pair return boxes both Floats, which ART
      * (no real escape analysis) turns into 3 heap allocations per pixel. Same float ops in
-     * the same order — bit-identical (identity test). `internal` only for that test.
+     * the same order — bit-identical (identity test). `internal` for that test AND for
+     * `Pipeline.estimateWholeFrameAlignment`'s rescue path, which uses it to compare candidate
+     * registrations by the exact cost the optimizer minimizes.
      */
     internal fun ssdWarped(
         movL: FloatArray, refL: FloatArray, w: Int, h: Int,
@@ -326,8 +336,11 @@ data class ChainBounds(
      * Per-pixel squared-residual cap passed to [AffineAligner.estimate] and the robust
      * translation pre-pass, so focus-blur mismatches between adjacent brackets cannot pull the
      * optimizer off the common background signal.
-     * Default (0.0001) tuned on the synthetic bracket fixture (band amplitude diff ≈ 0.20);
-     * the proven handheld clip for whole-frame alignment is Pipeline.alignmentRobustClip = 0.02.
+     * Default (0.0001) tuned on the synthetic bracket fixture (band amplitude diff ≈ 0.20) and
+     * field-proven on real device brackets (DepthBracketRegressionTests, 2026-06-10). The
+     * whole-frame burst paths use a SCENE-ADAPTIVE clip bounded by the same value
+     * (`Pipeline.adaptiveAlignmentClip`, dim-scene investigation 2026-06-12) — kept as SEPARATE
+     * constants on purpose so retuning one path can never silently change the other.
      * Validate on-device (Task 12); if high-ISO links mis-seed, relax toward 0.001.
      * null = plain SSD (no clipping).
      */
