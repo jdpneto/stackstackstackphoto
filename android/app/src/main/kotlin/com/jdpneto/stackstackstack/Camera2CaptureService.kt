@@ -29,6 +29,7 @@ import com.jdpneto.stackengine.PixelImage
 import com.jdpneto.stackengine.RawSensorFrame
 import com.jdpneto.stackengine.Vec3
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.File
 import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -36,6 +37,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -98,13 +100,20 @@ import kotlin.math.max
  * looper — a previous revision posted all timers through the main thread, so a busy main thread
  * silently disarmed every watchdog.
  */
-class Camera2CaptureService(
+open class Camera2CaptureService(
     private val context: Context
 ) : CaptureService {
 
     private companion object {
         const val TAG = "SSSCamera2"
         const val NO_TOKEN = -1L
+        /**
+         * Age gate for the app-start spool sweep: a spool dir untouched for this long is a crash
+         * leftover by definition (a live burst writes for seconds and its processing job reads
+         * for minutes). Anything younger may belong to ANOTHER service instance whose orphaned
+         * processing job is still reading it — see [instanceSpoolRoot].
+         */
+        const val SPOOL_SWEEP_MAX_AGE_MS = 60L * 60 * 1000   // 1 hour
     }
 
     // -----------------------------------------------------------------------
@@ -160,7 +169,17 @@ class Camera2CaptureService(
     private var previewSurface: Surface? = null
     private var rawImageReader: ImageReader? = null
     private var jpegImageReader: ImageReader? = null
-    private var configured = false
+    /** Session fully configured. `protected` only for the test seam (PreviewResumeTest). */
+    protected var configured = false
+    /**
+     * STICKY "the UI wants a live preview" intent (bug 3, round 2). Set by [startPreview], cleared
+     * only by [close]. Sticky so that a preview surface arriving LATER than the UI's one-shot
+     * [startPreview] trigger (the resume race: SurfaceView destroys its surface on hide and
+     * recreates it on show, racing the resumeTick LaunchedEffect) auto-resumes the preview from
+     * [setPreviewSurface] — the service owns the restart; the UI's call order can't matter.
+     * sessionExecutor-confined.
+     */
+    private var previewRequested = false
 
     // -----------------------------------------------------------------------
     // Capabilities (written on sessionExecutor once; read elsewhere after configure)
@@ -196,7 +215,8 @@ class Camera2CaptureService(
     private var continuation: ((Result<CapturedBurst>) -> Unit)? = null
 
     private var burstInfo:        CaptureInfo? = null   // set-once from the first frame
-    private var pendingRaw:       MutableList<RawSensorFrame> = mutableListOf()
+    /** Spool files of this burst's converted RAW frames, in join order (see [BurstSpool]). */
+    private var pendingRawFiles:  MutableList<File>          = mutableListOf()
     private var pendingDeveloped: MutableList<PixelImage>     = mutableListOf()
     private var fallbackJPEG:     Boolean = false
     private var activeRecipe:     CaptureRecipe? = null // manual Pro overrides for this burst
@@ -230,43 +250,181 @@ class Camera2CaptureService(
     @Volatile private var meteredExposureNs:  Long?  = null
 
     // -----------------------------------------------------------------------
+    // RAW frame spool (the 30-frame OOM fix — see BurstSpool)
+    // -----------------------------------------------------------------------
+
+    /** Root of all burst spool dirs (SHARED across service instances — see [instanceSpoolRoot]).
+     *  cacheDir: the OS may reclaim it when the app isn't using it. */
+    private val spoolRoot = File(context.cacheDir, "burst-spool")
+
+    /**
+     * THIS instance's spool namespace — unique per service instance. Spool-cleanup OWNERSHIP
+     * story: activity recreation (uiMode/locale/font-scale are NOT in the manifest's
+     * configChanges) builds a NEW service while the OLD coordinator's background processing job
+     * survives onDestroy (its scope is never cancelled) and may still be LAZILY reading the old
+     * instance's spool files ([BurstSpool.LazyFrameList] re-reads on every get). So no instance
+     * may ever delete another LIVE instance's spool dir. Two cleanups, each safe by construction:
+     *  - PER-BURST-ARM (captureBurst): clears only inside THIS namespace, where the coordinator's
+     *    shutter gate (isBusy = capturing OR processing) guarantees this instance's previous
+     *    burst payload is no longer being consumed when a new burst arms;
+     *  - APP-START (init below): an AGE-GATED sweep of the shared root — only dirs older than
+     *    [SPOOL_SWEEP_MAX_AGE_MS] (crash leftovers by definition) are deleted; a young foreign
+     *    dir is presumed live and left alone (it is reclaimed by a later app start).
+     */
+    private val instanceSpoolRoot = File(spoolRoot, "svc-${java.util.UUID.randomUUID()}")
+
+    /** This burst's spool dir (written on stateExecutor at arm time; read on conversionExecutor). */
+    @Volatile private var spoolDir: File? = null
+
+    /** Per-burst spool file index (incremented on the single-threaded conversionExecutor). */
+    private val spoolCounter = AtomicInteger(0)
+
+    init {
+        // App-start sweep of CRASH LEFTOVERS only — age-gated, never the whole root: a young
+        // foreign spool dir may belong to a previous service instance whose orphaned processing
+        // job is still reading it (see instanceSpoolRoot kdoc for the full ownership story).
+        // Runs on conversionExecutor so it serializes with spool writes.
+        try {
+            conversionExecutor.execute { BurstSpool.sweepStaleSpools(spoolRoot, SPOOL_SWEEP_MAX_AGE_MS) }
+        } catch (_: RejectedExecutionException) {}
+    }
+
+    // -----------------------------------------------------------------------
     // Preview surface provider (B3 UI hook)
     // -----------------------------------------------------------------------
 
     /**
      * Provide the [Surface] the Camera2 session should send the repeating preview into. Must be
      * called BEFORE [startPreview] so [ensureConfiguredLocked] can include it in the session
-     * output list.
+     * output list (both hop onto [sessionExecutor], a FIFO single thread, so the UI-thread call
+     * order is preserved).
      *
      * Mirrors the iOS pattern where [AVCaptureService.startPreview] returns a [CALayer] that the
      * view hosts directly. Here the UI creates a [android.view.SurfaceView] (or [android.graphics.SurfaceTexture]),
      * extracts its [Surface], and registers it here; [startPreview] then returns it back to the
      * coordinator so the coordinator can hand it to the Compose [AndroidView].
      *
-     * No-op if called after the session is already configured (the caller must recreate the
-     * service if the surface changes, which matches the iOS app-lifecycle model).
+     * A DIFFERENT surface arriving while the session is configured means the window's surface
+     * was destroyed and recreated (app went to the background and back — bug 3): the session
+     * still targets the dead surface, so tear it down — and, when a preview has ever been
+     * requested ([previewRequested]), RECONFIGURE AND RESUME THE PREVIEW RIGHT HERE. The first
+     * round of this fix only invalidated and waited for the UI to call [startPreview] again,
+     * but on the Pixel the resume-keyed startPreview raced this call and ran FIRST, against the
+     * stale surface (framework started then stopped the stream 52 ms later); the invalidate
+     * here then tore that session down with both one-shot UI triggers already consumed — black
+     * preview. Owning the restart at the service altitude makes the ordering irrelevant: the
+     * surface is the last event to land, and it restarts the preview itself.
      */
     fun setPreviewSurface(surface: Surface) {
-        if (!configured) {
-            previewSurface = surface
-        }
+        try {
+            sessionExecutor.execute {
+                if (surface === previewSurface) return@execute   // same surface — nothing to do
+                if (configured) invalidateSessionLocked(null)
+                previewSurface = surface
+                if (previewRequested) {
+                    // A LIVE burst must NOT be stomped: reconfiguring here would rebuild the
+                    // session with a plain auto-AE repeating preview, and the burst's REMAINING
+                    // stills (which submit to whatever session exists at submit time) would
+                    // capture without the burst-long AE/AWB hold — an exposure shift mixed into
+                    // one stack. Defer: the sticky previewRequested intent and the new surface
+                    // are both stored; finishLocked's resumePreviewAfterBurstLocked detects the
+                    // dead session and runs the full reconfigure when the burst ends.
+                    if (stateLock.withLock { continuation != null }) return@execute
+                    try {
+                        // Fresh configure includes the new surface and starts the repeating
+                        // preview itself (ensureConfiguredLocked tail).
+                        ensureConfiguredLocked()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "preview restart on surface replacement failed", e)
+                    }
+                }
+            }
+        } catch (_: RejectedExecutionException) {}   // closed — surface callbacks may outlive us
     }
+
+    /**
+     * The preview surface was destroyed (SurfaceView hides → app backgrounded). Invalidate any
+     * session targeting it and FORGET it, so nothing can configure against a dead surface in
+     * the window before the recreated surface arrives. [previewRequested] stays sticky — the
+     * next [setPreviewSurface] auto-resumes the preview with no UI involvement.
+     */
+    fun clearPreviewSurface() {
+        try {
+            sessionExecutor.execute {
+                if (previewSurface == null) return@execute
+                if (configured) invalidateSessionLocked(null)
+                previewSurface = null
+            }
+        } catch (_: RejectedExecutionException) {}   // closed — surface callbacks may outlive us
+    }
+
+    /**
+     * TEST-ONLY barrier: blocks until everything queued on [sessionExecutor] so far has run
+     * (FIFO single thread ⇒ a marker task is a fence). Lets PreviewResumeTest assert "nothing
+     * happened" without sleeping.
+     */
+    internal fun awaitSessionQuiescentForTest(timeoutMs: Long = 5_000) {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        try {
+            sessionExecutor.execute { latch.countDown() }
+        } catch (_: RejectedExecutionException) { return }
+        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+    }
+
+    /** TEST-ONLY probe: whether a burst is currently armed (its continuation is set). */
+    internal fun isBurstActiveForTest(): Boolean = stateLock.withLock { continuation != null }
 
     // -----------------------------------------------------------------------
     // CaptureService: startPreview
     // -----------------------------------------------------------------------
 
+    /**
+     * Idempotent, no-op-safe retrigger (bug 3): when the session is already configured this
+     * re-issues the plain repeating preview request, which is harmless if the preview is already
+     * streaming and restores it if the repeating request was lost — UNLESS a burst is in flight,
+     * whose AE/AWB hold owns the repeating slot. When the camera was lost in the background
+     * ([invalidateSessionLocked] ran), `configured` is false and this reopens from scratch.
+     *
+     * Reads the CURRENT [previewSurface] at execution time on [sessionExecutor] (never a captured
+     * reference — the surface may have been replaced or cleared since the caller suspended).
+     * With NO surface stored (destroyed, or not created yet) this only records the sticky
+     * [previewRequested] intent and returns null: configuring now would open the camera with no
+     * preview output only to tear it straight down when the recreated surface lands in
+     * [setPreviewSurface] — which then owns the actual (re)start.
+     */
     override suspend fun startPreview(): Surface? {
         if (!ensurePermission()) return null
         return suspendCancellableCoroutine { cont ->
-            sessionExecutor.execute {
-                try {
-                    ensureConfiguredLocked()
-                    cont.resume(previewSurface)
-                } catch (e: Exception) {
-                    Log.w(TAG, "startPreview configure failed", e)
-                    cont.resume(null)
+            try {
+                sessionExecutor.execute {
+                    previewRequested = true
+                    if (previewSurface == null) {
+                        cont.resume(null)   // sticky flag set — the next surface auto-resumes
+                        return@execute
+                    }
+                    // A LIVE burst owns the repeating slot (its AE/AWB hold) — and, when the
+                    // session was invalidated mid-burst (surface replacement), a fresh configure
+                    // here would rebuild it under a plain auto-AE preview, shifting exposure
+                    // inside the stack. Either way: record the sticky intent only; finishLocked's
+                    // resumePreviewAfterBurstLocked restores (or fully reconfigures) at burst end.
+                    if (stateLock.withLock { continuation != null }) {
+                        cont.resume(previewSurface)
+                        return@execute
+                    }
+                    try {
+                        val wasConfigured = configured
+                        ensureConfiguredLocked()
+                        // ensureConfiguredLocked starts the repeating preview itself on a fresh
+                        // configure; on the already-configured path restore it here.
+                        if (wasConfigured) startPreviewRequestLocked()
+                        cont.resume(previewSurface)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "startPreview configure failed", e)
+                        cont.resume(null)
+                    }
                 }
+            } catch (e: RejectedExecutionException) {
+                cont.resume(null)   // service closed
             }
         }
     }
@@ -399,7 +557,7 @@ class Camera2CaptureService(
                     }
 
                     generation++
-                    pendingRaw        = mutableListOf()
+                    pendingRawFiles   = mutableListOf()
                     pendingDeveloped  = mutableListOf()
                     burstInfo         = null
                     expectedJoins     = 0
@@ -419,6 +577,18 @@ class Camera2CaptureService(
                     fallbackJPEG      = !_supportsRAWCapture
 
                     val gen = generation
+
+                    // Arm this burst's RAW spool and clear THIS INSTANCE's earlier generations
+                    // (safe: the coordinator's shutter gate means nothing can still be reading
+                    // them). Scoped to instanceSpoolRoot — another instance's spool may still be
+                    // read by its orphaned processing job (see instanceSpoolRoot kdoc).
+                    val newSpool = File(instanceSpoolRoot, "gen-$gen")
+                    spoolDir = newSpool
+                    spoolCounter.set(0)
+                    try {
+                        conversionExecutor.execute { BurstSpool.clearSpools(instanceSpoolRoot, keep = newSpool) }
+                    } catch (_: RejectedExecutionException) {}
+
                     // Cancellation must not strand the state machine: a cancelled caller leaves
                     // `continuation` set, and the next shot would see Busy forever. Resuming a
                     // cancelled continuation is a documented no-op, so finishLocked just clears.
@@ -595,7 +765,7 @@ class Camera2CaptureService(
             if (!isFirst) {
                 // Later frame never steadied → stop requesting frames, stack what we have.
                 Log.w(TAG, "steadiness gate timed out mid-burst — finishing with " +
-                    "${pendingRaw.size + pendingDeveloped.size} frames")
+                    "${pendingRawFiles.size + pendingDeveloped.size} frames")
                 remaining = 0
                 maybeFinishLocked()
                 return
@@ -860,7 +1030,7 @@ class Camera2CaptureService(
     private fun timeoutFrameLocked(token: Long, gen: Int) {
         if (continuation == null || generation != gen || inFlightToken != token) return
         Log.w(TAG, "per-frame watchdog fired (frame ${totalFrames - remaining}/$totalFrames) — " +
-            "ending burst with ${pendingRaw.size + pendingDeveloped.size} frames so far")
+            "ending burst with ${pendingRawFiles.size + pendingDeveloped.size} frames so far")
         inFlightToken = NO_TOKEN
         remaining     = 0           // request no more frames…
         maybeFinishLocked()         // …and wait (bounded) for outstanding joins to drain
@@ -881,14 +1051,15 @@ class Camera2CaptureService(
         scheduleOnState(pacingMs) { stateLock.withLock { startNextFrameLocked(gen) } }
     }
 
-    /** One join conversion finished (frame may be null = dropped). Must run on stateExecutor. */
-    private fun joinDoneLocked(gen: Int, raw: RawSensorFrame?, developed: PixelImage?) {
+    /** One join conversion finished (frame may be null = dropped). Must run on stateExecutor.
+     *  RAW frames arrive as their SPOOL FILE ([BurstSpool]) — the mosaic is already on disk. */
+    private fun joinDoneLocked(gen: Int, rawFile: File?, developed: PixelImage?) {
         if (generation != gen || continuation == null) return
         joined++
         when {
-            raw != null -> {
-                pendingRaw.add(raw)
-                onProgress?.invoke(pendingRaw.size)
+            rawFile != null -> {
+                pendingRawFiles.add(rawFile)
+                onProgress?.invoke(pendingRawFiles.size)
             }
             developed != null -> {
                 pendingDeveloped.add(developed)
@@ -923,7 +1094,7 @@ class Camera2CaptureService(
             stateLock.withLock {
                 if (generation != gen || continuation == null) return@withLock
                 Log.w(TAG, "join drain timed out ($joined of $expectedJoins joins) — " +
-                    "finishing with ${pendingRaw.size + pendingDeveloped.size} frames")
+                    "finishing with ${pendingRawFiles.size + pendingDeveloped.size} frames")
                 finishLocked()
             }
         }
@@ -932,7 +1103,7 @@ class Camera2CaptureService(
     /** Resume the continuation exactly once and reset per-burst state. Must run on stateExecutor. */
     private fun finishLocked() {
         val cont = continuation ?: return
-        Log.i(TAG, "finish: raw=${pendingRaw.size} dev=${pendingDeveloped.size} joined=$joined/$expectedJoins")
+        Log.i(TAG, "finish: raw=${pendingRawFiles.size} dev=${pendingDeveloped.size} joined=$joined/$expectedJoins")
         continuation    = null
         inFlightToken   = NO_TOKEN
         activeRecipe    = null
@@ -944,9 +1115,10 @@ class Camera2CaptureService(
         burstInfo = null
 
         // Drop stranded join halves and release the burst's AE/AWB hold (plain preview resumes
-        // the auto loop — iOS re-locks at the next shoot the same way).
+        // the auto loop — iOS re-locks at the next shoot the same way). If the surface was
+        // replaced mid-burst, the deferred reconfigure runs now (resumePreviewAfterBurstLocked).
         imageHandler.post { clearJoinState() }
-        sessionExecutor.execute { startPreviewRequestLocked() }
+        sessionExecutor.execute { resumePreviewAfterBurstLocked() }
 
         if (fallbackJPEG) {
             val imgs = pendingDeveloped.toList()
@@ -954,10 +1126,13 @@ class Camera2CaptureService(
             if (imgs.isEmpty()) cont(Result.failure(CaptureError.NoFramesProduced))
             else                cont(Result.success(CapturedBurst(payload = CapturedBurst.Payload.Developed(imgs), info = info)))
         } else {
-            val frames = pendingRaw.toList()
-            pendingRaw = mutableListOf()
-            if (frames.isEmpty()) cont(Result.failure(CaptureError.NoFramesProduced))
-            else                  cont(Result.success(CapturedBurst(payload = CapturedBurst.Payload.Raw(frames), info = info)))
+            // The RAW payload is a DISK-BACKED lazy list over this burst's spool files — the
+            // engine API is unchanged (List<RawSensorFrame>) but no mosaic lives in memory until
+            // the pipeline indexes it. Residency contract: BurstSpool.LazyFrameList kdoc.
+            val files = pendingRawFiles.toList()
+            pendingRawFiles = mutableListOf()
+            if (files.isEmpty()) cont(Result.failure(CaptureError.NoFramesProduced))
+            else                 cont(Result.success(CapturedBurst(payload = CapturedBurst.Payload.Raw(BurstSpool.LazyFrameList(files)), info = info)))
         }
     }
 
@@ -1013,14 +1188,25 @@ class Camera2CaptureService(
      * reports join completion to the state machine — even on [Throwable] (an uncaught Error/OOM
      * killing a conversion runnable used to strand the burst's outstanding count forever; the
      * watchdog couldn't finish past it, which is the live wedge signature).
+     *
+     * RAW frames are SPOOLED TO DISK here (sequential on this executor; ~25 MB ≈ tens of ms on
+     * UFS — well inside the inter-frame pacing) and only the [File] reaches the state machine,
+     * so peak in-memory residency during a burst is ONE mosaic instead of all of them
+     * (30 × ~25 MB ≈ 750 MB blew the 512 MB largeHeap ceiling at ~frame 21 — device finding).
      */
     private fun submitConversion(gen: Int, image: Image, meta: FrameColorMetadata?, isJpeg: Boolean) {
         val work = Runnable {
-            var raw: RawSensorFrame? = null
+            var rawFile: File? = null
             var developed: PixelImage? = null
             try {
-                if (isJpeg) developed = decodeJpegImage(image)
-                else        raw       = convertRawImage(image, meta)
+                if (isJpeg) {
+                    developed = decodeJpegImage(image)
+                } else {
+                    val raw = convertRawImage(image, meta)
+                    if (raw != null) rawFile = spoolRawFrame(gen, raw)
+                    // `raw` goes out of scope here — the mosaic is garbage as soon as the spool
+                    // write returns; nothing in-memory accumulates across the burst.
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "frame conversion failed — frame dropped", t)
             } finally {
@@ -1028,7 +1214,7 @@ class Camera2CaptureService(
             }
             try {
                 stateExecutor.execute {
-                    stateLock.withLock { joinDoneLocked(gen, raw, developed) }
+                    stateLock.withLock { joinDoneLocked(gen, rawFile, developed) }
                 }
             } catch (_: RejectedExecutionException) {}
         }
@@ -1040,6 +1226,23 @@ class Camera2CaptureService(
             try {
                 stateExecutor.execute { stateLock.withLock { joinDoneLocked(gen, null, null) } }
             } catch (_: RejectedExecutionException) {}
+        }
+    }
+
+    /**
+     * Write [raw] to this burst's spool dir and return the file, or null when the burst is
+     * already stale (generation moved on) or the write fails (frame dropped — a missing frame
+     * beats an OOM). Runs on [conversionExecutor].
+     */
+    private fun spoolRawFrame(gen: Int, raw: RawSensorFrame): File? {
+        val dir = stateLock.withLock { if (generation == gen) spoolDir else null } ?: return null
+        return try {
+            val file = File(dir, "frame-%03d.bin".format(spoolCounter.getAndIncrement()))
+            BurstSpool.write(file, raw)
+            file
+        } catch (t: Throwable) {
+            Log.w(TAG, "RAW spool write failed — frame dropped", t)
+            null
         }
     }
 
@@ -1149,8 +1352,11 @@ class Camera2CaptureService(
      * and probes capabilities. Both async waits are BOUNDED — an unbounded `latch.await()` here
      * used to block the session thread (and with it every queued capture) forever if the HAL
      * never called back.
+     *
+     * `protected open` only as the Robolectric test seam (PreviewResumeTest overrides it to count
+     * configures without a camera HAL); production code must not override.
      */
-    private fun ensureConfiguredLocked() {
+    protected open fun ensureConfiguredLocked() {
         if (configured) return
 
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -1211,15 +1417,30 @@ class Camera2CaptureService(
         val latch      = java.util.concurrent.CountDownLatch(1)
 
         manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+            // This callback lives for the DEVICE's whole life, not just the open: onDisconnected/
+            // onError also fire LATER when the system evicts the camera (app backgrounded — the
+            // live "black preview on return" bug 3). During open, counting the latch with
+            // deviceRef unset makes the configure fail cleanly; after open, the session is
+            // marked dead via invalidateSessionLocked so the next startPreview/ensureConfigured
+            // reopens from scratch. (latch.countDown() past zero and invalidating a device that
+            // never became cameraDevice are both no-ops, so each path is safe on both timings.)
             override fun onOpened(camera: CameraDevice) {
                 deviceRef.set(camera); latch.countDown()
             }
             override fun onDisconnected(camera: CameraDevice) {
+                Log.w(TAG, "camera disconnected — marking session dead")
                 camera.close(); latch.countDown()
+                try {
+                    sessionExecutor.execute { invalidateSessionLocked(camera) }
+                } catch (_: RejectedExecutionException) {}
             }
             override fun onError(camera: CameraDevice, error: Int) {
+                Log.w(TAG, "camera error $error — marking session dead")
                 openError.set(RuntimeException("Camera open error: $error"))
                 camera.close(); latch.countDown()
+                try {
+                    sessionExecutor.execute { invalidateSessionLocked(camera) }
+                } catch (_: RejectedExecutionException) {}
             }
         }, imageHandler)
 
@@ -1308,11 +1529,65 @@ class Camera2CaptureService(
     }
 
     /**
+     * Tear down a dead camera session so the next [startPreview]/[ensureConfigured] reopens from
+     * scratch (bug 3: background eviction closed the device, but `configured` stayed true so
+     * nothing ever rebuilt — black preview). Must run on [sessionExecutor].
+     *
+     * [lostDevice] non-null = called from the device StateCallback; ignored when it isn't the
+     * CURRENT device (a stale callback from an already-replaced device, or a failure during open
+     * before [cameraDevice] was assigned — those paths are handled by the open latch).
+     * [previewSurface] is deliberately KEPT: the window's surface usually survives backgrounding
+     * and the rebuilt session should reuse it. A DESTROYED surface is cleared by
+     * [clearPreviewSurface]; a recreated one arrives via [setPreviewSurface], which owns the
+     * preview restart ([previewRequested]).
+     *
+     * Any in-flight burst is not touched here — its frames simply stop arriving and the
+     * per-frame watchdog/drain timeout finish it with the frames gathered so far.
+     */
+    private fun invalidateSessionLocked(lostDevice: CameraDevice?) {
+        if (lostDevice != null && cameraDevice !== lostDevice) return
+        if (!configured && cameraDevice == null) return   // nothing to tear down
+        Log.w(TAG, "invalidating camera session (configured=$configured)")
+        try { captureSession?.close() } catch (_: Throwable) {}
+        try { cameraDevice?.close() } catch (_: Throwable) {}
+        try { rawImageReader?.close() } catch (_: Throwable) {}
+        try { jpegImageReader?.close() } catch (_: Throwable) {}
+        captureSession  = null
+        cameraDevice    = null
+        rawImageReader  = null
+        jpegImageReader = null
+        configured      = false
+        imageHandler.post { clearJoinState() }
+    }
+
+    /**
+     * Post-burst preview restore — the [finishLocked] tail. Two shapes, on [sessionExecutor]:
+     *  - session still alive (the normal case) → swap the burst's AE/AWB hold for the plain
+     *    repeating preview, resuming the auto loop;
+     *  - the preview surface was REPLACED mid-burst ([setPreviewSurface] invalidated the session
+     *    and DEFERRED its restart to here so the burst's remaining frames kept one consistent
+     *    exposure) → the old session is dead, so honor the pending replacement with a full
+     *    reconfigure (whose tail starts the repeating preview itself). Also covers a session
+     *    lost mid-burst to device eviction: the sticky intent reopens at burst end, best-effort.
+     */
+    private fun resumePreviewAfterBurstLocked() {
+        if (configured) { startPreviewRequestLocked(); return }
+        if (!previewRequested || previewSurface == null) return
+        try {
+            ensureConfiguredLocked()
+        } catch (e: Exception) {
+            Log.w(TAG, "preview restore after burst failed", e)   // preview is best-effort
+        }
+    }
+
+    /**
      * Start (or restore) the plain repeating preview request — no-op without a preview surface.
      * Also serves as the post-burst unlock: replacing the burst's hold request resumes the
-     * AE/AWB auto loop.
+     * AE/AWB auto loop. Reads the CURRENT [previewSurface] field at execution time.
+     *
+     * `protected open` only as the Robolectric test seam (PreviewResumeTest).
      */
-    private fun startPreviewRequestLocked() {
+    protected open fun startPreviewRequestLocked() {
         val session = captureSession ?: return
         val device  = cameraDevice  ?: return
         val surface = previewSurface ?: return
@@ -1355,6 +1630,8 @@ class Camera2CaptureService(
             rawImageReader = null
             jpegImageReader = null
             configured = false
+            previewRequested = false   // a surface arriving after close must NOT reopen
+            previewSurface = null
             imageHandler.post { clearJoinState() }
             scheduler.shutdown()
             conversionExecutor.shutdown()

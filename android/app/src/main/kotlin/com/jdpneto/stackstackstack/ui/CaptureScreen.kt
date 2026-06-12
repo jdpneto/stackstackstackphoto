@@ -53,12 +53,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -142,6 +144,20 @@ fun CaptureScreen(
     // Re-check on every ON_RESUME: a user who grants the permission in system Settings and
     // returns must get a live preview, not a permanently black screen (the launcher callback
     // never fires in that flow).
+    //
+    // resumeTick (bug 3): backgrounding can evict the camera while the SurfaceView's surface
+    // SURVIVES — so on return no surfaceCreated fires, the (cameraGranted, surfaceReady) keys
+    // are unchanged, and nothing would call startPreview → black preview behind the controls.
+    // Bumping a counter on every ON_RESUME re-keys CameraPreview's LaunchedEffect so startPreview
+    // runs again; the service made that call idempotent (still streaming → harmless repeating-
+    // request reissue; camera lost → full reconfigure).
+    //
+    // When the surface DID get destroyed/recreated, this trigger can race surfaceCreated (it did,
+    // on the Pixel) — that's fine now: the service owns the preview restart (sticky
+    // previewRequested in Camera2CaptureService; a startPreview with no surface is a deferred
+    // no-op and the arriving surface resumes itself). resumeTick stays as belt-and-braces for
+    // the surface-survived case; the service is correct without it.
+    var resumeTick by remember { mutableStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -149,6 +165,7 @@ fun CaptureScreen(
                 cameraGranted = ContextCompat.checkSelfPermission(
                     context, Manifest.permission.CAMERA
                 ) == PackageManager.PERMISSION_GRANTED
+                resumeTick++
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -182,6 +199,7 @@ fun CaptureScreen(
         CameraPreview(
             coordinator = coordinator,
             cameraGranted = cameraGranted,
+            resumeTick = resumeTick,
             // Same derived gate the coordinator itself uses — previously this omitted
             // processingCount, so the focus square drew while the coordinator ignored the tap.
             tapToFocusEnabled = uiState.tapToFocusEnabled,
@@ -354,11 +372,16 @@ private fun currentDisplayRotation(context: Context): Int =
  *
  * [cameraGranted]: when false the surface is created but [startPreview] is NOT called (Fix 2).
  * Once [cameraGranted] flips to true the [LaunchedEffect] restarts and calls [startPreview].
+ *
+ * [resumeTick]: bumped by the screen's ON_RESUME observer (bug 3) — re-runs the effect so a
+ * camera evicted in the background is re-opened even when the surface survived (no
+ * surfaceCreated, no key change otherwise). startPreview is idempotent on the service side.
  */
 @Composable
 private fun CameraPreview(
     coordinator: StackCaptureCoordinator,
     cameraGranted: Boolean,
+    resumeTick: Int,
     tapToFocusEnabled: Boolean,
     onFocusTap: (x: Float, y: Float, lock: Boolean) -> Unit,
     modifier: Modifier = Modifier
@@ -367,7 +390,7 @@ private fun CameraPreview(
     // Start (or restart) preview whenever permission is granted. surfaceReady tracks whether the
     // SurfaceHolder.Callback has fired — we need BOTH the surface and the permission.
     var surfaceReady by remember { mutableStateOf(false) }
-    LaunchedEffect(cameraGranted, surfaceReady) {
+    LaunchedEffect(cameraGranted, surfaceReady, resumeTick) {
         if (cameraGranted && surfaceReady) {
             coordinator.startPreview()
         }
@@ -386,6 +409,12 @@ private fun CameraPreview(
                     }
                     override fun surfaceChanged(holder: SurfaceHolder, fmt: Int, w: Int, h: Int) {}
                     override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        // Tell the service the surface is DEAD so nothing (e.g. a racing
+                        // resumeTick startPreview) configures against it; the recreated
+                        // surface auto-resumes the preview service-side (sticky
+                        // previewRequested — see Camera2CaptureService.setPreviewSurface).
+                        (coordinator.captureService as? Camera2CaptureService)
+                            ?.clearPreviewSurface()
                         surfaceReady = false
                     }
                 })
@@ -413,6 +442,35 @@ private fun CameraPreview(
 // ---------------------------------------------------------------------------
 // Burst sliders
 // ---------------------------------------------------------------------------
+
+/**
+ * Measure rotated: lay the slider out as h×w so a -90° draw fits exactly (a plain
+ * rotate() is a draw-time graphicsLayer op — it paints outside its layout box and covered the
+ * labels — device finding, Pixel 10 Pro).
+ *
+ * Must be the OUTERMOST sizing modifier: chain `.rotateVertically().width(180.dp).height(44.dp)`.
+ * The layout block swaps the incoming constraints, so the inner width/height modifiers size the
+ * slider itself (180 long × 44 thick, pre-rotation) while this block reports the swapped
+ * (44 × 180) box and centers the placeable in it; the trailing rotate(-90f) then paints the
+ * content exactly inside the reported box. Sizing OUTSIDE this modifier would instead swap a
+ * fixed 180×44 box into a 44-long slider painted sideways.
+ */
+private fun Modifier.rotateVertically(): Modifier = this
+    .layout { measurable, constraints ->
+        val placeable = measurable.measure(
+            Constraints(
+                minWidth = constraints.minHeight, maxWidth = constraints.maxHeight,
+                minHeight = constraints.minWidth, maxHeight = constraints.maxWidth
+            )
+        )
+        layout(placeable.height, placeable.width) {
+            placeable.place(
+                x = -(placeable.width - placeable.height) / 2,
+                y = (placeable.width - placeable.height) / 2
+            )
+        }
+    }
+    .rotate(-90f)
 
 /**
  * Vertical Photos/Time sliders pinned to the left/right edges; shown only for the long-exposure
@@ -456,8 +514,8 @@ private fun BurstSliders(state: CoordinatorUiState, coordinator: StackCaptureCoo
                 enabled = !busy,
                 colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White),
                 modifier = Modifier
+                    .rotateVertically()      // BEFORE width/height — see rotateVertically kdoc
                     .width(180.dp)
-                    .rotate(-90f)
                     .height(44.dp)
                     .testTag("burst-photos-slider")
                     .semantics { contentDescription = "Photos" }
@@ -489,8 +547,8 @@ private fun BurstSliders(state: CoordinatorUiState, coordinator: StackCaptureCoo
                 enabled = !busy,
                 colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White),
                 modifier = Modifier
+                    .rotateVertically()      // BEFORE width/height — see rotateVertically kdoc
                     .width(180.dp)
-                    .rotate(-90f)
                     .height(44.dp)
                     .testTag("burst-time-slider")
                     .semantics { contentDescription = "Time" }
