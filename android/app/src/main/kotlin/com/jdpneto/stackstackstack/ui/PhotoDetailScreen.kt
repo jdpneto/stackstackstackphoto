@@ -12,6 +12,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Rotate90DegreesCcw
+import androidx.compose.material.icons.filled.Rotate90DegreesCw
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -132,7 +134,7 @@ fun PhotoDetailScreen(
                             .semantics { contentDescription = "Rotate left" }
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Edit, // placeholder; real icon via painter
+                            imageVector = Icons.Default.Rotate90DegreesCcw,
                             contentDescription = "Rotate left",
                             tint = Color.White
                         )
@@ -146,7 +148,7 @@ fun PhotoDetailScreen(
                             .semantics { contentDescription = "Rotate right" }
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Edit,
+                            imageVector = Icons.Default.Rotate90DegreesCw,
                             contentDescription = "Rotate right",
                             tint = Color.White
                         )
